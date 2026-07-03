@@ -11,6 +11,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
+use windows::Win32::UI::Controls::Dialogs::*;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::ExtractIconExW;
@@ -67,6 +68,9 @@ struct AppState {
     antigravity_session_text: String,
     antigravity_weekly_percent: f64,
     antigravity_weekly_text: String,
+    custom_fill_color: Option<Color>,
+    custom_clock_color: Option<Color>,
+    custom_text_color: Option<Color>,
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
@@ -128,9 +132,16 @@ const IDM_LANG_KOREAN: u16 = 47;
 const IDM_LANG_TRADITIONAL_CHINESE: u16 = 48;
 const IDM_LANG_RUSSIAN: u16 = 49;
 const IDM_LANG_PORTUGUESE_BRAZIL: u16 = 50;
+const IDM_LANG_SIMPLIFIED_CHINESE: u16 = 51;
 const IDM_MODEL_CLAUDE_CODE: u16 = 60;
 const IDM_MODEL_CODEX: u16 = 61;
 const IDM_MODEL_ANTIGRAVITY: u16 = 62;
+const IDM_COLOR_FILL: u16 = 80;
+const IDM_COLOR_CLOCK: u16 = 81;
+const IDM_COLOR_TEXT: u16 = 82;
+const IDM_COLOR_RESET: u16 = 83;
+const IDM_SCREEN_BASE: u16 = 100;
+const IDM_SCREEN_MAX: u16 = IDM_SCREEN_BASE + 32;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -289,6 +300,110 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn color_from_setting(value: Option<&str>) -> Option<Color> {
+    let value = value?.trim();
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(Color::from_hex(hex))
+}
+
+fn color_to_hex(color: Color) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+}
+
+fn color_from_colorref(color: COLORREF) -> Color {
+    let value = color.0;
+    Color {
+        r: (value & 0xFF) as u8,
+        g: ((value >> 8) & 0xFF) as u8,
+        b: ((value >> 16) & 0xFF) as u8,
+    }
+}
+
+fn choose_color(hwnd: HWND, initial: Color) -> Option<Color> {
+    unsafe {
+        let mut custom_colors = [COLORREF(0x00FF_FFFF); 16];
+        let mut chooser = CHOOSECOLORW {
+            lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+            hwndOwner: hwnd,
+            rgbResult: COLORREF(initial.to_colorref()),
+            lpCustColors: custom_colors.as_mut_ptr(),
+            Flags: CC_FULLOPEN | CC_RGBINIT,
+            ..Default::default()
+        };
+
+        if ChooseColorW(&mut chooser).as_bool() {
+            Some(color_from_colorref(chooser.rgbResult))
+        } else {
+            None
+        }
+    }
+}
+
+fn label_colors(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "颜色"
+    } else {
+        "Colors"
+    }
+}
+
+fn label_fill_color(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "填充颜色"
+    } else {
+        "Fill Color"
+    }
+}
+
+fn label_clock_color(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "时钟底色"
+    } else {
+        "Clock Base Color"
+    }
+}
+
+fn label_text_color(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "文字颜色"
+    } else {
+        "Text Color"
+    }
+}
+
+fn label_reset_colors(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "重置颜色"
+    } else {
+        "Reset Colors"
+    }
+}
+
+fn label_screen(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "屏幕"
+    } else {
+        "Screen"
+    }
+}
+
+fn screen_label(language: LanguageId, index: usize, is_primary: bool) -> String {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        if is_primary {
+            format!("屏幕 {}（主屏）", index + 1)
+        } else {
+            format!("屏幕 {}", index + 1)
+        }
+    } else if is_primary {
+        format!("Screen {} (primary)", index + 1)
+    } else {
+        format!("Screen {}", index + 1)
+    }
+}
+
 fn settings_path() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata)
@@ -316,6 +431,12 @@ struct SettingsFile {
     show_codex: bool,
     #[serde(default = "default_show_antigravity")]
     show_antigravity: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_fill_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_clock_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_text_color: Option<String>,
 }
 
 impl Default for SettingsFile {
@@ -330,6 +451,9 @@ impl Default for SettingsFile {
             show_claude_code: false,
             show_codex: true,
             show_antigravity: false,
+            custom_fill_color: None,
+            custom_clock_color: None,
+            custom_text_color: None,
         }
     }
 }
@@ -395,6 +519,9 @@ fn save_state_settings() {
             show_claude_code: s.show_claude_code,
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
+            custom_fill_color: s.custom_fill_color.map(color_to_hex),
+            custom_clock_color: s.custom_clock_color.map(color_to_hex),
+            custom_text_color: s.custom_text_color.map(color_to_hex),
         });
     }
 }
@@ -1056,19 +1183,14 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-// Dimensions matching the C# version
-const SEGMENT_W: i32 = 10;
-const SEGMENT_H: i32 = 13;
-const SEGMENT_GAP: i32 = 1;
-const SEGMENT_COUNT: i32 = 10;
-const CORNER_RADIUS: i32 = 2;
-
+// Compact clock UI dimensions.
+const CLOCK_SIZE: i32 = 14;
+const CLOCK_TEXT_GAP: i32 = 6;
 const LEFT_DIVIDER_W: i32 = 3;
 const DIVIDER_RIGHT_MARGIN: i32 = 10;
 const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 10;
-const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 78;
+const TEXT_WIDTH: i32 = 82;
 const MODEL_RIGHT_MARGIN: i32 = 3;
 const RIGHT_MARGIN: i32 = 1;
 const WIDGET_HEIGHT: i32 = 46;
@@ -1096,19 +1218,8 @@ fn active_model_count(show_claude_code: bool, show_codex: bool, show_antigravity
     (show_claude_code as i32 + show_codex as i32 + show_antigravity as i32).max(1)
 }
 
-fn row_bar_segment_count(active_models: i32) -> i32 {
-    match active_models {
-        1 => SEGMENT_COUNT,
-        2 => 5,
-        _ => 4,
-    }
-}
-
 fn total_widget_width_for(active_models: i32) -> i32 {
-    let bar_segments = row_bar_segment_count(active_models);
-    let model_width = (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * bar_segments - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(TEXT_WIDTH);
+    let model_width = sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(TEXT_WIDTH);
 
     sc(LEFT_DIVIDER_W)
         + sc(DIVIDER_RIGHT_MARGIN)
@@ -1142,12 +1253,8 @@ fn claude_accent_color() -> Color {
     Color::from_hex("#D97757")
 }
 
-fn codex_accent_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F5F5F5")
-    } else {
-        Color::from_hex("#1F1F1F")
-    }
+fn codex_accent_color() -> Color {
+    Color::from_hex("#2563EB")
 }
 
 fn antigravity_accent_color() -> Color {
@@ -1175,6 +1282,22 @@ fn antigravity_usage_text_color(is_dark: bool) -> Color {
         Color::from_hex("#8AB4F8")
     } else {
         Color::from_hex("#1967D2")
+    }
+}
+
+fn default_clock_color(is_dark: bool) -> Color {
+    if is_dark {
+        Color::from_hex("#444444")
+    } else {
+        Color::from_hex("#B8B8B8")
+    }
+}
+
+fn default_text_color(is_dark: bool) -> Color {
+    if is_dark {
+        Color::from_hex("#E7E7E7")
+    } else {
+        Color::from_hex("#303030")
     }
 }
 
@@ -1320,6 +1443,9 @@ pub fn run() {
                 antigravity_session_text: "--".to_string(),
                 antigravity_weekly_percent: 0.0,
                 antigravity_weekly_text: "--".to_string(),
+                custom_fill_color: color_from_setting(settings.custom_fill_color.as_deref()),
+                custom_clock_color: color_from_setting(settings.custom_clock_color.as_deref()),
+                custom_text_color: color_from_setting(settings.custom_text_color.as_deref()),
                 show_claude_code: settings.show_claude_code,
                 show_codex: settings.show_codex,
                 show_antigravity: settings.show_antigravity,
@@ -1448,6 +1574,9 @@ fn render_layered() {
         show_claude_code,
         show_codex,
         show_antigravity,
+        custom_fill_color,
+        custom_clock_color,
+        custom_text_color,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -1471,6 +1600,9 @@ fn render_layered() {
                 s.show_claude_code,
                 s.show_codex,
                 s.show_antigravity,
+                s.custom_fill_color,
+                s.custom_clock_color,
+                s.custom_text_color,
             ),
             None => return,
         }
@@ -1489,19 +1621,11 @@ fn render_layered() {
     let width = total_widget_width();
     let height = sc(WIDGET_HEIGHT);
 
-    let accent = claude_accent_color();
-    let codex_accent = codex_accent_color(is_dark);
-    let antigravity_accent = antigravity_accent_color();
-    let track = if is_dark {
-        Color::from_hex("#444444")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#888888")
-    } else {
-        Color::from_hex("#404040")
-    };
+    let accent = custom_fill_color.unwrap_or_else(claude_accent_color);
+    let codex_accent = custom_fill_color.unwrap_or_else(codex_accent_color);
+    let antigravity_accent = custom_fill_color.unwrap_or_else(antigravity_accent_color);
+    let track = custom_clock_color.unwrap_or_else(|| default_clock_color(is_dark));
+    let text_color = custom_text_color.unwrap_or_else(|| default_text_color(is_dark));
     let bg_color = if is_dark {
         Color::from_hex("#1C1C1C")
     } else {
@@ -1695,8 +1819,8 @@ fn paint_content(
         let _ = DeleteObject(right_brush);
 
         let content_x = sc(LEFT_DIVIDER_W) + sc(DIVIDER_RIGHT_MARGIN);
-        let row2_y = height - sc(5) - sc(SEGMENT_H);
-        let row1_y = row2_y - sc(10) - sc(SEGMENT_H);
+        let row2_y = height - sc(5) - sc(CLOCK_SIZE);
+        let row1_y = row2_y - sc(10) - sc(CLOCK_SIZE);
 
         let _ = SetBkMode(hdc, TRANSPARENT);
         let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
@@ -2580,11 +2704,12 @@ unsafe extern "system" fn wnd_proc(
                     {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
-                            s.tray_offset = 0;
+                            s.tray_offset = default_tray_offset();
                         }
                     }
                     save_state_settings();
                     position_at_taskbar();
+                    render_layered();
                 }
                 IDM_START_WITH_WINDOWS => {
                     set_startup_enabled(!is_startup_enabled());
@@ -2646,6 +2771,68 @@ unsafe extern "system" fn wnd_proc(
                         do_poll(sh);
                     });
                 }
+                IDM_COLOR_FILL | IDM_COLOR_CLOCK | IDM_COLOR_TEXT => {
+                    let (initial, target) = {
+                        let state = lock_state();
+                        match state.as_ref() {
+                            Some(s) => {
+                                let fallback = match id {
+                                    IDM_COLOR_FILL => {
+                                        if s.show_codex
+                                            && !s.show_claude_code
+                                            && !s.show_antigravity
+                                        {
+                                            codex_accent_color()
+                                        } else {
+                                            claude_accent_color()
+                                        }
+                                    }
+                                    IDM_COLOR_CLOCK => default_clock_color(s.is_dark),
+                                    IDM_COLOR_TEXT => default_text_color(s.is_dark),
+                                    _ => codex_accent_color(),
+                                };
+                                let initial = match id {
+                                    IDM_COLOR_FILL => s.custom_fill_color.unwrap_or(fallback),
+                                    IDM_COLOR_CLOCK => s.custom_clock_color.unwrap_or(fallback),
+                                    IDM_COLOR_TEXT => s.custom_text_color.unwrap_or(fallback),
+                                    _ => fallback,
+                                };
+                                (initial, id)
+                            }
+                            None => (codex_accent_color(), id),
+                        }
+                    };
+
+                    if let Some(color) = choose_color(hwnd, initial) {
+                        {
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                match target {
+                                    IDM_COLOR_FILL => s.custom_fill_color = Some(color),
+                                    IDM_COLOR_CLOCK => s.custom_clock_color = Some(color),
+                                    IDM_COLOR_TEXT => s.custom_text_color = Some(color),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        save_state_settings();
+                        render_layered();
+                        sync_tray_icons(hwnd);
+                    }
+                }
+                IDM_COLOR_RESET => {
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.custom_fill_color = None;
+                            s.custom_clock_color = None;
+                            s.custom_text_color = None;
+                        }
+                    }
+                    save_state_settings();
+                    render_layered();
+                    sync_tray_icons(hwnd);
+                }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
                 | IDM_LANG_DUTCH
@@ -2654,6 +2841,7 @@ unsafe extern "system" fn wnd_proc(
                 | IDM_LANG_GERMAN
                 | IDM_LANG_JAPANESE
                 | IDM_LANG_KOREAN
+                | IDM_LANG_SIMPLIFIED_CHINESE
                 | IDM_LANG_TRADITIONAL_CHINESE
                 | IDM_LANG_RUSSIAN
                 | IDM_LANG_PORTUGUESE_BRAZIL => {
@@ -2666,6 +2854,7 @@ unsafe extern "system" fn wnd_proc(
                         IDM_LANG_GERMAN => Some(LanguageId::German),
                         IDM_LANG_JAPANESE => Some(LanguageId::Japanese),
                         IDM_LANG_KOREAN => Some(LanguageId::Korean),
+                        IDM_LANG_SIMPLIFIED_CHINESE => Some(LanguageId::SimplifiedChinese),
                         IDM_LANG_TRADITIONAL_CHINESE => Some(LanguageId::TraditionalChinese),
                         IDM_LANG_RUSSIAN => Some(LanguageId::Russian),
                         IDM_LANG_PORTUGUESE_BRAZIL => Some(LanguageId::PortugueseBrazil),
@@ -2679,6 +2868,21 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     render_layered();
+                }
+                id if (IDM_SCREEN_BASE..IDM_SCREEN_MAX).contains(&id) => {
+                    let index = (id - IDM_SCREEN_BASE) as usize;
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.taskbar_index = index;
+                            s.tray_offset = default_tray_offset();
+                        }
+                    }
+                    save_state_settings();
+                    if attach_to_taskbar(hwnd, index) {
+                        position_at_taskbar();
+                        render_layered();
+                    }
                 }
                 id if id == tray_icon::IDM_TOGGLE_WIDGET => {
                     toggle_widget_visibility(hwnd);
@@ -2728,6 +2932,7 @@ fn show_context_menu(hwnd: HWND) {
             show_claude_code,
             show_codex,
             show_antigravity,
+            taskbar_index,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -2742,6 +2947,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_claude_code,
                     s.show_codex,
                     s.show_antigravity,
+                    s.taskbar_index,
                 ),
                 None => (
                     POLL_15_MIN,
@@ -2754,6 +2960,7 @@ fn show_context_menu(hwnd: HWND) {
                     false,
                     true,
                     false,
+                    0,
                 ),
             }
         };
@@ -2872,6 +3079,71 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(reset_pos_str.as_ptr()),
         );
 
+        let colors_menu = CreatePopupMenu().unwrap();
+        let fill_color = native_interop::wide_str(label_fill_color(language));
+        let _ = AppendMenuW(
+            colors_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_COLOR_FILL as usize,
+            PCWSTR::from_raw(fill_color.as_ptr()),
+        );
+        let clock_color = native_interop::wide_str(label_clock_color(language));
+        let _ = AppendMenuW(
+            colors_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_COLOR_CLOCK as usize,
+            PCWSTR::from_raw(clock_color.as_ptr()),
+        );
+        let text_color = native_interop::wide_str(label_text_color(language));
+        let _ = AppendMenuW(
+            colors_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_COLOR_TEXT as usize,
+            PCWSTR::from_raw(text_color.as_ptr()),
+        );
+        let _ = AppendMenuW(colors_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let reset_colors = native_interop::wide_str(label_reset_colors(language));
+        let _ = AppendMenuW(
+            colors_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_COLOR_RESET as usize,
+            PCWSTR::from_raw(reset_colors.as_ptr()),
+        );
+        let colors_label = native_interop::wide_str(label_colors(language));
+        let _ = AppendMenuW(
+            settings_menu,
+            MF_POPUP,
+            colors_menu.0 as usize,
+            PCWSTR::from_raw(colors_label.as_ptr()),
+        );
+
+        let taskbars = native_interop::find_taskbars();
+        if !taskbars.is_empty() {
+            let screen_menu = CreatePopupMenu().unwrap();
+            for (index, taskbar) in taskbars.iter().take(32).enumerate() {
+                let label = screen_label(language, index, taskbar.is_primary);
+                let label_str = native_interop::wide_str(&label);
+                let flags = if taskbar_index == index {
+                    MF_CHECKED
+                } else {
+                    MENU_ITEM_FLAGS(0)
+                };
+                let _ = AppendMenuW(
+                    screen_menu,
+                    flags,
+                    (IDM_SCREEN_BASE + index as u16) as usize,
+                    PCWSTR::from_raw(label_str.as_ptr()),
+                );
+            }
+            let screen_label = native_interop::wide_str(label_screen(language));
+            let _ = AppendMenuW(
+                settings_menu,
+                MF_POPUP,
+                screen_menu.0 as usize,
+                PCWSTR::from_raw(screen_label.as_ptr()),
+            );
+        }
+
         let language_menu = CreatePopupMenu().unwrap();
         let system_label = native_interop::wide_str(strings.system_default);
         let system_flags = if language_override.is_none() {
@@ -2895,6 +3167,7 @@ fn show_context_menu(hwnd: HWND) {
                 LanguageId::German => IDM_LANG_GERMAN,
                 LanguageId::Japanese => IDM_LANG_JAPANESE,
                 LanguageId::Korean => IDM_LANG_KOREAN,
+                LanguageId::SimplifiedChinese => IDM_LANG_SIMPLIFIED_CHINESE,
                 LanguageId::TraditionalChinese => IDM_LANG_TRADITIONAL_CHINESE,
                 LanguageId::Russian => IDM_LANG_RUSSIAN,
                 LanguageId::PortugueseBrazil => IDM_LANG_PORTUGUESE_BRAZIL,
@@ -3000,6 +3273,9 @@ fn paint(hdc: HDC, hwnd: HWND) {
         show_claude_code,
         show_codex,
         show_antigravity,
+        custom_fill_color,
+        custom_clock_color,
+        custom_text_color,
     ) = {
         let state = lock_state();
         match state.as_ref() {
@@ -3021,24 +3297,19 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.show_claude_code,
                 s.show_codex,
                 s.show_antigravity,
+                s.custom_fill_color,
+                s.custom_clock_color,
+                s.custom_text_color,
             ),
             None => return,
         }
     };
 
-    let accent = claude_accent_color();
-    let codex_accent = codex_accent_color(is_dark);
-    let antigravity_accent = antigravity_accent_color();
-    let track = if is_dark {
-        Color::from_hex("#444444")
-    } else {
-        Color::from_hex("#AAAAAA")
-    };
-    let text_color = if is_dark {
-        Color::from_hex("#888888")
-    } else {
-        Color::from_hex("#404040")
-    };
+    let accent = custom_fill_color.unwrap_or_else(claude_accent_color);
+    let codex_accent = custom_fill_color.unwrap_or_else(codex_accent_color);
+    let antigravity_accent = custom_fill_color.unwrap_or_else(antigravity_accent_color);
+    let track = custom_clock_color.unwrap_or_else(|| default_clock_color(is_dark));
+    let text_color = custom_text_color.unwrap_or_else(|| default_text_color(is_dark));
     let bg_color = if is_dark {
         Color::from_hex("#1C1C1C")
     } else {
@@ -3117,9 +3388,9 @@ fn draw_row(
     antigravity_accent: &Color,
     track: &Color,
 ) {
-    let seg_h = sc(SEGMENT_H);
+    let row_h = sc(CLOCK_SIZE);
     let active_models = active_model_count(show_claude_code, show_codex, show_antigravity);
-    let segment_count = row_bar_segment_count(active_models);
+    let segment_count = 10;
     let use_model_text_colors = active_models > 1;
     let claude_value_color = if use_model_text_colors {
         claude_usage_text_color(is_dark)
@@ -3144,7 +3415,7 @@ fn draw_row(
             left: x,
             top: y,
             right: x + sc(LABEL_WIDTH),
-            bottom: y + seg_h,
+            bottom: y + row_h,
         };
         let _ = DrawTextW(
             hdc,
@@ -3199,9 +3470,8 @@ fn draw_row(
 }
 
 fn model_usage_width(segment_count: i32) -> i32 {
-    (sc(SEGMENT_W) + sc(SEGMENT_GAP)) * segment_count - sc(SEGMENT_GAP)
-        + sc(BAR_RIGHT_MARGIN)
-        + sc(TEXT_WIDTH)
+    let _ = segment_count;
+    sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(TEXT_WIDTH)
 }
 
 fn draw_usage_bar(
@@ -3215,67 +3485,27 @@ fn draw_usage_bar(
     track: &Color,
     text_color: &Color,
 ) {
-    let seg_w = sc(SEGMENT_W);
-    let seg_h = sc(SEGMENT_H);
-    let seg_gap = sc(SEGMENT_GAP);
-    let corner_r = sc(CORNER_RADIUS);
+    let clock_size = sc(CLOCK_SIZE);
 
     unsafe {
-        let percent_clamped = percent.clamp(0.0, 100.0);
-        let segment_percent = 100.0 / segment_count as f64;
+        draw_clock(
+            hdc,
+            bar_x,
+            y,
+            clock_size,
+            percent,
+            segment_count,
+            accent,
+            track,
+        );
 
-        for i in 0..segment_count {
-            let seg_x = bar_x + i * (seg_w + seg_gap);
-            let seg_start = (i as f64) * segment_percent;
-            let seg_end = seg_start + segment_percent;
-
-            let seg_rect = RECT {
-                left: seg_x,
-                top: y,
-                right: seg_x + seg_w,
-                bottom: y + seg_h,
-            };
-
-            if percent_clamped >= seg_end {
-                draw_rounded_rect(hdc, &seg_rect, accent, corner_r);
-            } else if percent_clamped <= seg_start {
-                draw_rounded_rect(hdc, &seg_rect, track, corner_r);
-            } else {
-                draw_rounded_rect(hdc, &seg_rect, track, corner_r);
-                let fraction = (percent_clamped - seg_start) / segment_percent;
-                let fill_width = (seg_w as f64 * fraction) as i32;
-                if fill_width > 0 {
-                    let fill_rect = RECT {
-                        left: seg_x,
-                        top: y,
-                        right: seg_x + fill_width,
-                        bottom: y + seg_h,
-                    };
-                    let rgn = CreateRoundRectRgn(
-                        seg_rect.left,
-                        seg_rect.top,
-                        seg_rect.right + 1,
-                        seg_rect.bottom + 1,
-                        corner_r * 2,
-                        corner_r * 2,
-                    );
-                    let _ = SelectClipRgn(hdc, rgn);
-                    let brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
-                    FillRect(hdc, &fill_rect, brush);
-                    let _ = DeleteObject(brush);
-                    let _ = SelectClipRgn(hdc, HRGN::default());
-                    let _ = DeleteObject(rgn);
-                }
-            }
-        }
-
-        let text_x = bar_x + segment_count * (seg_w + seg_gap) - seg_gap + sc(BAR_RIGHT_MARGIN);
+        let text_x = bar_x + clock_size + sc(CLOCK_TEXT_GAP);
         let mut text_wide: Vec<u16> = text.encode_utf16().collect();
         let mut text_rect = RECT {
             left: text_x,
             top: y,
             right: text_x + sc(TEXT_WIDTH),
-            bottom: y + seg_h,
+            bottom: y + clock_size,
         };
         let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
         let _ = DrawTextW(
@@ -3287,19 +3517,63 @@ fn draw_usage_bar(
     }
 }
 
-fn draw_rounded_rect(hdc: HDC, rect: &RECT, color: &Color, radius: i32) {
+fn draw_clock(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    size: i32,
+    percent: f64,
+    segment_count: i32,
+    fill: &Color,
+    track: &Color,
+) {
     unsafe {
-        let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
-        let rgn = CreateRoundRectRgn(
-            rect.left,
-            rect.top,
-            rect.right + 1,
-            rect.bottom + 1,
-            radius * 2,
-            radius * 2,
-        );
-        let _ = FillRgn(hdc, rgn, brush);
-        let _ = DeleteObject(rgn);
-        let _ = DeleteObject(brush);
+        let rect = RECT {
+            left: x,
+            top: y,
+            right: x + size,
+            bottom: y + size,
+        };
+        let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
+        let fill_brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
+        let pen = CreatePen(PS_SOLID, sc(1), COLORREF(fill.to_colorref()));
+        let old_pen = SelectObject(hdc, pen);
+        let old_track_brush = SelectObject(hdc, track_brush);
+        let _ = Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
+
+        let steps = ((percent.clamp(0.0, 100.0) / 10.0).ceil() as i32).clamp(0, segment_count);
+        if steps > 0 {
+            let old_fill_brush = SelectObject(hdc, fill_brush);
+            if steps >= segment_count {
+                let _ = Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
+            } else {
+                let angle = std::f64::consts::TAU * (steps as f64 / segment_count as f64);
+                let cx = x + size / 2;
+                let cy = y + size / 2;
+                let radius = size as f64 / 2.0;
+                let start_x = cx;
+                let start_y = y - 1;
+                let end_x = cx + (angle.sin() * radius).round() as i32;
+                let end_y = cy - (angle.cos() * radius).round() as i32;
+                let _ = Pie(
+                    hdc,
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                );
+            }
+            SelectObject(hdc, old_fill_brush);
+        }
+
+        SelectObject(hdc, old_track_brush);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(pen);
+        let _ = DeleteObject(track_brush);
+        let _ = DeleteObject(fill_brush);
     }
 }

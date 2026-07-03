@@ -13,7 +13,7 @@ The original project is MIT licensed; its license is kept in this repository.
 - local reset time for the 5-hour window
 - tray tooltip with remaining percentage, used percentage, reset time, data source, and stale status
 
-The progress bars still use the upstream "used percentage" fill, so the bar grows as the limit is consumed while the text tells you how much remains.
+The compact clock indicators show used percentage in 10% steps. Codex uses blue by default, Claude Code uses orange by default, and `0%` is empty.
 
 ## Data Sources
 
@@ -66,9 +66,17 @@ Settings:
 %APPDATA%\CodexUsageTaskbar\settings.json
 ```
 
+## UI Settings
+
+Right-click the widget to open the menu.
+
+- `Settings > Language` includes Simplified Chinese.
+- `Settings > Colors` lets you choose the fill color, clock base color, and text color with the Windows color picker.
+- `Settings > Screen` lets you choose which taskbar/monitor hosts the widget.
+
 ## Taskbar Placement
 
-The default `tray_offset` is intentionally large. On startup, the app clamps it to the leftmost available area before the Windows tray icons. Drag the left divider if you want to reposition it.
+The primary Windows taskbar is screen 1 and is used by default. The default `tray_offset` is intentionally large, so on startup the app clamps itself to the leftmost available area before the Windows tray icons. Drag the left divider if you want to reposition it, or use `Settings > Screen` to move it to another monitor.
 
 ## GitHub Publishing
 
@@ -101,5 +109,7 @@ Changes in this fork:
 - Claude Code and Antigravity are disabled by default
 - taskbar text displays remaining Codex usage
 - the 5-hour row shows local reset time
+- progress bars were replaced with compact clock indicators
+- Simplified Chinese localization, custom colors, and screen selection were added
 - local Codex session JSONL fallback is available
 - settings, startup key, diagnostics, and binary metadata use `Codex Usage Taskbar`
