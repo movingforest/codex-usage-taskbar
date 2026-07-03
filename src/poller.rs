@@ -1762,6 +1762,13 @@ pub fn format_remaining_line(section: &UsageSection, show_reset_time: bool) -> S
     }
 }
 
+pub fn format_remaining_line_with_reset_date(section: &UsageSection) -> String {
+    let pct = format!("{:.0}%", section.remaining_percent);
+    format_reset_date(section.resets_at)
+        .map(|reset| format!("{pct} \u{00b7} {reset}"))
+        .unwrap_or(pct)
+}
+
 pub fn format_detail_line(section: &UsageSection) -> String {
     let mut parts = vec![format!(
         "{:.0}% remaining ({:.0}% used)",
@@ -1790,6 +1797,12 @@ fn format_reset_time(resets_at: Option<SystemTime>) -> Option<String> {
     } else {
         Some(reset.format("%m-%d %H:%M").to_string())
     }
+}
+
+fn format_reset_date(resets_at: Option<SystemTime>) -> Option<String> {
+    let reset = resets_at?;
+    let reset: chrono::DateTime<chrono::Local> = reset.into();
+    Some(reset.format("%m-%d").to_string())
 }
 
 fn format_countdown(resets_at: Option<SystemTime>, strings: Strings) -> String {

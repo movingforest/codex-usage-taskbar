@@ -13,7 +13,7 @@ The original project is MIT licensed; its license is kept in this repository.
 - local reset time for the 5-hour window
 - tray tooltip with remaining percentage, used percentage, reset time, data source, and stale status
 
-The compact clock indicators show used percentage in 10% steps. Codex uses blue by default, Claude Code uses orange by default, and `0%` is empty.
+The compact clock indicators show used percentage in 10% steps. Codex uses blue by default, Claude Code uses orange by default, and `0%` is empty. When both Codex and Claude Code are visible, the taskbar widget uses two tiny color-coded rings; when only one is visible, the ring and percentage text scale up for readability.
 
 ## Data Sources
 
@@ -71,7 +71,7 @@ Settings:
 Right-click the widget to open the menu.
 
 - `Settings > Language` includes Simplified Chinese.
-- `Settings > Colors` lets you choose the fill color, clock base color, and text color with the Windows color picker.
+- `Settings > Colors` opens a compact color panel with a live preview and swatches for Codex fill, Claude fill, clock base, and text color.
 - `Settings > Screen` lets you choose which taskbar/monitor hosts the widget.
 
 ## Taskbar Placement
@@ -111,5 +111,6 @@ Changes in this fork:
 - the 5-hour row shows local reset time
 - progress bars were replaced with compact clock indicators
 - Simplified Chinese localization, custom colors, and screen selection were added
+- the taskbar widget uses color-coded rings instead of model names, with `5h` reset time and `7d` reset date columns
 - local Codex session JSONL fallback is available
 - settings, startup key, diagnostics, and binary metadata use `Codex Usage Taskbar`

@@ -68,7 +68,8 @@ struct AppState {
     antigravity_session_text: String,
     antigravity_weekly_percent: f64,
     antigravity_weekly_text: String,
-    custom_fill_color: Option<Color>,
+    custom_codex_fill_color: Option<Color>,
+    custom_claude_fill_color: Option<Color>,
     custom_clock_color: Option<Color>,
     custom_text_color: Option<Color>,
     show_claude_code: bool,
@@ -95,6 +96,7 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
+    color_window_hwnd: Option<SendHwnd>,
 }
 
 #[derive(Clone, Debug)]
@@ -136,12 +138,16 @@ const IDM_LANG_SIMPLIFIED_CHINESE: u16 = 51;
 const IDM_MODEL_CLAUDE_CODE: u16 = 60;
 const IDM_MODEL_CODEX: u16 = 61;
 const IDM_MODEL_ANTIGRAVITY: u16 = 62;
-const IDM_COLOR_FILL: u16 = 80;
-const IDM_COLOR_CLOCK: u16 = 81;
-const IDM_COLOR_TEXT: u16 = 82;
-const IDM_COLOR_RESET: u16 = 83;
+const IDM_COLORS_DIALOG: u16 = 80;
 const IDM_SCREEN_BASE: u16 = 100;
 const IDM_SCREEN_MAX: u16 = IDM_SCREEN_BASE + 32;
+const IDC_COLOR_CODEX: u16 = 200;
+const IDC_COLOR_CLAUDE: u16 = 201;
+const IDC_COLOR_CLOCK: u16 = 202;
+const IDC_COLOR_TEXT: u16 = 203;
+const IDC_COLOR_APPLY: u16 = 204;
+const IDC_COLOR_RESET: u16 = 205;
+const IDC_COLOR_CLOSE: u16 = 206;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -350,11 +356,19 @@ fn label_colors(language: LanguageId) -> &'static str {
     }
 }
 
-fn label_fill_color(language: LanguageId) -> &'static str {
+fn label_codex_fill_color(language: LanguageId) -> &'static str {
     if matches!(language, LanguageId::SimplifiedChinese) {
-        "填充颜色"
+        "Codex 填充色"
     } else {
-        "Fill Color"
+        "Codex Fill"
+    }
+}
+
+fn label_claude_fill_color(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "Claude 填充色"
+    } else {
+        "Claude Fill"
     }
 }
 
@@ -376,9 +390,571 @@ fn label_text_color(language: LanguageId) -> &'static str {
 
 fn label_reset_colors(language: LanguageId) -> &'static str {
     if matches!(language, LanguageId::SimplifiedChinese) {
-        "重置颜色"
+        "重置默认"
     } else {
         "Reset Colors"
+    }
+}
+
+fn label_preview(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "预览"
+    } else {
+        "Preview"
+    }
+}
+
+fn label_apply(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "应用"
+    } else {
+        "Apply"
+    }
+}
+
+fn label_close(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "关闭"
+    } else {
+        "Close"
+    }
+}
+
+fn color_dialog_size() -> (i32, i32) {
+    (sc(360), sc(282))
+}
+
+fn show_color_settings_window(owner: HWND) {
+    unsafe {
+        if let Some(existing) = lock_state()
+            .as_ref()
+            .and_then(|state| state.color_window_hwnd)
+            .map(|hwnd| hwnd.to_hwnd())
+            .filter(|hwnd| IsWindow(*hwnd).as_bool())
+        {
+            let _ = ShowWindow(existing, SW_SHOW);
+            let _ = SetForegroundWindow(existing);
+            return;
+        }
+
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let class_name = native_interop::wide_str("CodexUsageColorSettings");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(color_settings_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let (width, height) = color_dialog_size();
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let title = {
+            let state = lock_state();
+            let language = state
+                .as_ref()
+                .map(|s| s.language)
+                .unwrap_or(LanguageId::English);
+            native_interop::wide_str(label_colors(language))
+        };
+
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            pt.x - width / 2,
+            pt.y - height - sc(12),
+            width,
+            height,
+            owner,
+            HMENU::default(),
+            hinstance,
+            None,
+        )
+        .unwrap();
+
+        {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.color_window_hwnd = Some(SendHwnd::from_hwnd(hwnd));
+            }
+        }
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+unsafe extern "system" fn color_settings_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            paint_color_settings(hdc, hwnd);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            handle_color_settings_click(hwnd, x, y);
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            if (wparam.0 as u16) == IDC_COLOR_CLOSE {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.color_window_hwnd = None;
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn paint_color_settings(hdc: HDC, _hwnd: HWND) {
+    let (language, is_dark, codex_fill, claude_fill, clock_color, text_color) = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) => (
+                s.language,
+                s.is_dark,
+                s.custom_codex_fill_color.unwrap_or_else(codex_accent_color),
+                s.custom_claude_fill_color
+                    .unwrap_or_else(claude_accent_color),
+                s.custom_clock_color
+                    .unwrap_or_else(|| default_clock_color(s.is_dark)),
+                s.custom_text_color
+                    .unwrap_or_else(|| default_text_color(s.is_dark)),
+            ),
+            None => (
+                LanguageId::English,
+                false,
+                codex_accent_color(),
+                claude_accent_color(),
+                default_clock_color(false),
+                default_text_color(false),
+            ),
+        }
+    };
+
+    let bg = if is_dark {
+        Color::from_hex("#202020")
+    } else {
+        Color::from_hex("#F4F5F7")
+    };
+    let panel = if is_dark {
+        Color::from_hex("#2B2B2B")
+    } else {
+        Color::from_hex("#FFFFFF")
+    };
+    let border = if is_dark {
+        Color::from_hex("#3F3F3F")
+    } else {
+        Color::from_hex("#D7DCE3")
+    };
+
+    unsafe {
+        let (width, height) = color_dialog_size();
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
+        FillRect(hdc, &rect, bg_brush);
+        let _ = DeleteObject(bg_brush);
+
+        let font_name = native_interop::wide_str("Segoe UI");
+        let font = CreateFontW(
+            sc(-12),
+            0,
+            0,
+            0,
+            FW_MEDIUM.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        );
+        let old_font = SelectObject(hdc, font);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+
+        draw_text_in_rect(
+            hdc,
+            label_colors(language),
+            RECT {
+                left: sc(16),
+                top: sc(12),
+                right: sc(160),
+                bottom: sc(34),
+            },
+            &text_color,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        draw_panel(
+            hdc,
+            RECT {
+                left: sc(14),
+                top: sc(40),
+                right: sc(346),
+                bottom: sc(88),
+            },
+            &panel,
+            &border,
+        );
+        draw_text_in_rect(
+            hdc,
+            label_preview(language),
+            RECT {
+                left: sc(24),
+                top: sc(48),
+                right: sc(80),
+                bottom: sc(80),
+            },
+            &text_color,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let preview_x = sc(92);
+        draw_row(
+            hdc,
+            preview_x,
+            sc(47),
+            is_dark,
+            &text_color,
+            "5h",
+            38.0,
+            "62% · 18:40",
+            24.0,
+            "76% · 18:40",
+            0.0,
+            "--",
+            true,
+            true,
+            false,
+            &claude_fill,
+            &codex_fill,
+            &antigravity_accent_color(),
+            &clock_color,
+        );
+        draw_row(
+            hdc,
+            preview_x,
+            sc(66),
+            is_dark,
+            &text_color,
+            "7d",
+            42.0,
+            "58% · 07-10",
+            33.0,
+            "67% · 07-10",
+            0.0,
+            "--",
+            true,
+            true,
+            false,
+            &claude_fill,
+            &codex_fill,
+            &antigravity_accent_color(),
+            &clock_color,
+        );
+
+        draw_color_row(
+            hdc,
+            language,
+            IDC_COLOR_CODEX,
+            label_codex_fill_color(language),
+            &codex_fill,
+            &panel,
+            &border,
+            &text_color,
+        );
+        draw_color_row(
+            hdc,
+            language,
+            IDC_COLOR_CLAUDE,
+            label_claude_fill_color(language),
+            &claude_fill,
+            &panel,
+            &border,
+            &text_color,
+        );
+        draw_color_row(
+            hdc,
+            language,
+            IDC_COLOR_CLOCK,
+            label_clock_color(language),
+            &clock_color,
+            &panel,
+            &border,
+            &text_color,
+        );
+        draw_color_row(
+            hdc,
+            language,
+            IDC_COLOR_TEXT,
+            label_text_color(language),
+            &text_color,
+            &panel,
+            &border,
+            &text_color,
+        );
+
+        draw_button(
+            hdc,
+            color_button_rect(IDC_COLOR_APPLY),
+            label_apply(language),
+            &panel,
+            &border,
+            &text_color,
+        );
+        draw_button(
+            hdc,
+            color_button_rect(IDC_COLOR_RESET),
+            label_reset_colors(language),
+            &panel,
+            &border,
+            &text_color,
+        );
+        draw_button(
+            hdc,
+            color_button_rect(IDC_COLOR_CLOSE),
+            label_close(language),
+            &panel,
+            &border,
+            &text_color,
+        );
+
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(font);
+    }
+}
+
+fn draw_color_row(
+    hdc: HDC,
+    _language: LanguageId,
+    id: u16,
+    label: &str,
+    color: &Color,
+    panel: &Color,
+    border: &Color,
+    text_color: &Color,
+) {
+    let swatch = color_swatch_rect(id);
+    let row_rect = RECT {
+        left: sc(14),
+        top: swatch.top - sc(6),
+        right: sc(346),
+        bottom: swatch.bottom + sc(6),
+    };
+    draw_panel(hdc, row_rect, panel, border);
+    draw_text_in_rect(
+        hdc,
+        label,
+        RECT {
+            left: sc(24),
+            top: row_rect.top,
+            right: sc(210),
+            bottom: row_rect.bottom,
+        },
+        text_color,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_panel(hdc, swatch, color, border);
+    draw_text_in_rect(
+        hdc,
+        &color_to_hex(*color),
+        RECT {
+            left: sc(214),
+            top: row_rect.top,
+            right: swatch.left - sc(8),
+            bottom: row_rect.bottom,
+        },
+        text_color,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+fn draw_button(hdc: HDC, rect: RECT, label: &str, bg: &Color, border: &Color, text: &Color) {
+    draw_panel(hdc, rect, bg, border);
+    draw_text_in_rect(
+        hdc,
+        label,
+        rect,
+        text,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+fn draw_panel(hdc: HDC, rect: RECT, bg: &Color, border: &Color) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
+        let pen = CreatePen(PS_SOLID, sc(1), COLORREF(border.to_colorref()));
+        let old_brush = SelectObject(hdc, brush);
+        let old_pen = SelectObject(hdc, pen);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            sc(8),
+            sc(8),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(pen);
+        let _ = DeleteObject(brush);
+    }
+}
+
+fn draw_text_in_rect(hdc: HDC, text: &str, mut rect: RECT, color: &Color, flags: DRAW_TEXT_FORMAT) {
+    unsafe {
+        let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let _ = DrawTextW(hdc, &mut wide, &mut rect, flags);
+    }
+}
+
+fn color_swatch_rect(id: u16) -> RECT {
+    let top = match id {
+        IDC_COLOR_CODEX => 98,
+        IDC_COLOR_CLAUDE => 130,
+        IDC_COLOR_CLOCK => 162,
+        IDC_COLOR_TEXT => 194,
+        _ => 98,
+    };
+    RECT {
+        left: sc(266),
+        top: sc(top),
+        right: sc(324),
+        bottom: sc(top + 20),
+    }
+}
+
+fn color_button_rect(id: u16) -> RECT {
+    let (left, right) = match id {
+        IDC_COLOR_APPLY => (154, 216),
+        IDC_COLOR_RESET => (222, 286),
+        IDC_COLOR_CLOSE => (292, 344),
+        _ => (0, 0),
+    };
+    RECT {
+        left: sc(left),
+        top: sc(238),
+        right: sc(right),
+        bottom: sc(264),
+    }
+}
+
+fn point_in_rect(x: i32, y: i32, rect: RECT) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+fn handle_color_settings_click(hwnd: HWND, x: i32, y: i32) {
+    for id in [
+        IDC_COLOR_CODEX,
+        IDC_COLOR_CLAUDE,
+        IDC_COLOR_CLOCK,
+        IDC_COLOR_TEXT,
+    ] {
+        if point_in_rect(x, y, color_swatch_rect(id)) {
+            let initial = {
+                let state = lock_state();
+                match state.as_ref() {
+                    Some(s) => match id {
+                        IDC_COLOR_CODEX => {
+                            s.custom_codex_fill_color.unwrap_or_else(codex_accent_color)
+                        }
+                        IDC_COLOR_CLAUDE => s
+                            .custom_claude_fill_color
+                            .unwrap_or_else(claude_accent_color),
+                        IDC_COLOR_CLOCK => s
+                            .custom_clock_color
+                            .unwrap_or_else(|| default_clock_color(s.is_dark)),
+                        IDC_COLOR_TEXT => s
+                            .custom_text_color
+                            .unwrap_or_else(|| default_text_color(s.is_dark)),
+                        _ => codex_accent_color(),
+                    },
+                    None => codex_accent_color(),
+                }
+            };
+            if let Some(color) = choose_color(hwnd, initial) {
+                {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        match id {
+                            IDC_COLOR_CODEX => s.custom_codex_fill_color = Some(color),
+                            IDC_COLOR_CLAUDE => s.custom_claude_fill_color = Some(color),
+                            IDC_COLOR_CLOCK => s.custom_clock_color = Some(color),
+                            IDC_COLOR_TEXT => s.custom_text_color = Some(color),
+                            _ => {}
+                        }
+                    }
+                }
+                save_state_settings();
+                render_layered();
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, true);
+                }
+            }
+            return;
+        }
+    }
+
+    if point_in_rect(x, y, color_button_rect(IDC_COLOR_APPLY)) {
+        save_state_settings();
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    } else if point_in_rect(x, y, color_button_rect(IDC_COLOR_RESET)) {
+        {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.custom_codex_fill_color = None;
+                s.custom_claude_fill_color = None;
+                s.custom_clock_color = None;
+                s.custom_text_color = None;
+            }
+        }
+        save_state_settings();
+        render_layered();
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, true);
+        }
+    } else if point_in_rect(x, y, color_button_rect(IDC_COLOR_CLOSE)) {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }
 
@@ -434,6 +1010,10 @@ struct SettingsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     custom_fill_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_codex_fill_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_claude_fill_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     custom_clock_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     custom_text_color: Option<String>,
@@ -452,6 +1032,8 @@ impl Default for SettingsFile {
             show_codex: true,
             show_antigravity: false,
             custom_fill_color: None,
+            custom_codex_fill_color: None,
+            custom_claude_fill_color: None,
             custom_clock_color: None,
             custom_text_color: None,
         }
@@ -519,7 +1101,9 @@ fn save_state_settings() {
             show_claude_code: s.show_claude_code,
             show_codex: s.show_codex,
             show_antigravity: s.show_antigravity,
-            custom_fill_color: s.custom_fill_color.map(color_to_hex),
+            custom_fill_color: None,
+            custom_codex_fill_color: s.custom_codex_fill_color.map(color_to_hex),
+            custom_claude_fill_color: s.custom_claude_fill_color.map(color_to_hex),
             custom_clock_color: s.custom_clock_color.map(color_to_hex),
             custom_text_color: s.custom_text_color.map(color_to_hex),
         });
@@ -786,7 +1370,7 @@ fn refresh_usage_texts(state: &mut AppState) {
 
     if let Some(claude_code) = data.claude_code.as_ref() {
         state.session_text = poller::format_line(&claude_code.session, strings);
-        state.weekly_text = poller::format_line(&claude_code.weekly, strings);
+        state.weekly_text = poller::format_remaining_line_with_reset_date(&claude_code.weekly);
     } else if state.show_claude_code {
         state.session_text = "!".to_string();
         state.weekly_text = "!".to_string();
@@ -794,7 +1378,7 @@ fn refresh_usage_texts(state: &mut AppState) {
 
     if let Some(codex) = data.codex.as_ref() {
         state.codex_session_text = poller::format_remaining_line(&codex.session, true);
-        state.codex_weekly_text = poller::format_remaining_line(&codex.weekly, false);
+        state.codex_weekly_text = poller::format_remaining_line_with_reset_date(&codex.weekly);
     } else if state.show_codex {
         state.codex_session_text = "!".to_string();
         state.codex_weekly_text = "!".to_string();
@@ -806,7 +1390,7 @@ fn refresh_usage_texts(state: &mut AppState) {
             if antigravity.weekly.resets_at.is_none() && antigravity.weekly.percentage == 0.0 {
                 "--".to_string()
             } else {
-                poller::format_line(&antigravity.weekly, strings)
+                poller::format_remaining_line_with_reset_date(&antigravity.weekly)
             };
     } else if state.show_antigravity {
         state.antigravity_session_text = "!".to_string();
@@ -1183,16 +1767,19 @@ fn set_startup_enabled(enable: bool) {
     }
 }
 
-// Compact clock UI dimensions.
-const CLOCK_SIZE: i32 = 14;
-const CLOCK_TEXT_GAP: i32 = 6;
+// Ultra-compact taskbar UI dimensions.
+const CLOCK_SIZE: i32 = 13;
+const LARGE_CLOCK_SIZE: i32 = 18;
+const CLOCK_TEXT_GAP: i32 = 4;
 const LEFT_DIVIDER_W: i32 = 3;
-const DIVIDER_RIGHT_MARGIN: i32 = 10;
+const DIVIDER_RIGHT_MARGIN: i32 = 8;
 const LABEL_WIDTH: i32 = 18;
-const LABEL_RIGHT_MARGIN: i32 = 10;
-const TEXT_WIDTH: i32 = 82;
-const MODEL_RIGHT_MARGIN: i32 = 3;
-const RIGHT_MARGIN: i32 = 1;
+const LABEL_RIGHT_MARGIN: i32 = 5;
+const RESET_WIDTH: i32 = 38;
+const MODEL_PERCENT_WIDTH: i32 = 31;
+const LARGE_MODEL_PERCENT_WIDTH: i32 = 42;
+const MODEL_RIGHT_MARGIN: i32 = 5;
+const RIGHT_MARGIN: i32 = 4;
 const WIDGET_HEIGHT: i32 = 46;
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
@@ -1219,11 +1806,17 @@ fn active_model_count(show_claude_code: bool, show_codex: bool, show_antigravity
 }
 
 fn total_widget_width_for(active_models: i32) -> i32 {
-    let model_width = sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(TEXT_WIDTH);
+    let model_width = if active_models <= 1 {
+        sc(LARGE_CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(LARGE_MODEL_PERCENT_WIDTH)
+    } else {
+        sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(MODEL_PERCENT_WIDTH)
+    };
 
     sc(LEFT_DIVIDER_W)
         + sc(DIVIDER_RIGHT_MARGIN)
         + sc(LABEL_WIDTH)
+        + sc(LABEL_RIGHT_MARGIN)
+        + sc(RESET_WIDTH)
         + sc(LABEL_RIGHT_MARGIN)
         + model_width * active_models
         + sc(MODEL_RIGHT_MARGIN) * (active_models - 1)
@@ -1259,30 +1852,6 @@ fn codex_accent_color() -> Color {
 
 fn antigravity_accent_color() -> Color {
     Color::from_hex("#4285F4")
-}
-
-fn claude_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F09A7A")
-    } else {
-        Color::from_hex("#A94F32")
-    }
-}
-
-fn codex_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#F5F5F5")
-    } else {
-        Color::from_hex("#1F1F1F")
-    }
-}
-
-fn antigravity_usage_text_color(is_dark: bool) -> Color {
-    if is_dark {
-        Color::from_hex("#8AB4F8")
-    } else {
-        Color::from_hex("#1967D2")
-    }
 }
 
 fn default_clock_color(is_dark: bool) -> Color {
@@ -1443,7 +2012,15 @@ pub fn run() {
                 antigravity_session_text: "--".to_string(),
                 antigravity_weekly_percent: 0.0,
                 antigravity_weekly_text: "--".to_string(),
-                custom_fill_color: color_from_setting(settings.custom_fill_color.as_deref()),
+                custom_codex_fill_color: color_from_setting(
+                    settings
+                        .custom_codex_fill_color
+                        .as_deref()
+                        .or(settings.custom_fill_color.as_deref()),
+                ),
+                custom_claude_fill_color: color_from_setting(
+                    settings.custom_claude_fill_color.as_deref(),
+                ),
                 custom_clock_color: color_from_setting(settings.custom_clock_color.as_deref()),
                 custom_text_color: color_from_setting(settings.custom_text_color.as_deref()),
                 show_claude_code: settings.show_claude_code,
@@ -1466,6 +2043,7 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
+                color_window_hwnd: None,
             });
         }
 
@@ -1574,7 +2152,8 @@ fn render_layered() {
         show_claude_code,
         show_codex,
         show_antigravity,
-        custom_fill_color,
+        custom_codex_fill_color,
+        custom_claude_fill_color,
         custom_clock_color,
         custom_text_color,
     ) = {
@@ -1600,7 +2179,8 @@ fn render_layered() {
                 s.show_claude_code,
                 s.show_codex,
                 s.show_antigravity,
-                s.custom_fill_color,
+                s.custom_codex_fill_color,
+                s.custom_claude_fill_color,
                 s.custom_clock_color,
                 s.custom_text_color,
             ),
@@ -1621,9 +2201,9 @@ fn render_layered() {
     let width = total_widget_width();
     let height = sc(WIDGET_HEIGHT);
 
-    let accent = custom_fill_color.unwrap_or_else(claude_accent_color);
-    let codex_accent = custom_fill_color.unwrap_or_else(codex_accent_color);
-    let antigravity_accent = custom_fill_color.unwrap_or_else(antigravity_accent_color);
+    let accent = custom_claude_fill_color.unwrap_or_else(claude_accent_color);
+    let codex_accent = custom_codex_fill_color.unwrap_or_else(codex_accent_color);
+    let antigravity_accent = antigravity_accent_color();
     let track = custom_clock_color.unwrap_or_else(|| default_clock_color(is_dark));
     let text_color = custom_text_color.unwrap_or_else(|| default_text_color(is_dark));
     let bg_color = if is_dark {
@@ -2771,67 +3351,8 @@ unsafe extern "system" fn wnd_proc(
                         do_poll(sh);
                     });
                 }
-                IDM_COLOR_FILL | IDM_COLOR_CLOCK | IDM_COLOR_TEXT => {
-                    let (initial, target) = {
-                        let state = lock_state();
-                        match state.as_ref() {
-                            Some(s) => {
-                                let fallback = match id {
-                                    IDM_COLOR_FILL => {
-                                        if s.show_codex
-                                            && !s.show_claude_code
-                                            && !s.show_antigravity
-                                        {
-                                            codex_accent_color()
-                                        } else {
-                                            claude_accent_color()
-                                        }
-                                    }
-                                    IDM_COLOR_CLOCK => default_clock_color(s.is_dark),
-                                    IDM_COLOR_TEXT => default_text_color(s.is_dark),
-                                    _ => codex_accent_color(),
-                                };
-                                let initial = match id {
-                                    IDM_COLOR_FILL => s.custom_fill_color.unwrap_or(fallback),
-                                    IDM_COLOR_CLOCK => s.custom_clock_color.unwrap_or(fallback),
-                                    IDM_COLOR_TEXT => s.custom_text_color.unwrap_or(fallback),
-                                    _ => fallback,
-                                };
-                                (initial, id)
-                            }
-                            None => (codex_accent_color(), id),
-                        }
-                    };
-
-                    if let Some(color) = choose_color(hwnd, initial) {
-                        {
-                            let mut state = lock_state();
-                            if let Some(s) = state.as_mut() {
-                                match target {
-                                    IDM_COLOR_FILL => s.custom_fill_color = Some(color),
-                                    IDM_COLOR_CLOCK => s.custom_clock_color = Some(color),
-                                    IDM_COLOR_TEXT => s.custom_text_color = Some(color),
-                                    _ => {}
-                                }
-                            }
-                        }
-                        save_state_settings();
-                        render_layered();
-                        sync_tray_icons(hwnd);
-                    }
-                }
-                IDM_COLOR_RESET => {
-                    {
-                        let mut state = lock_state();
-                        if let Some(s) = state.as_mut() {
-                            s.custom_fill_color = None;
-                            s.custom_clock_color = None;
-                            s.custom_text_color = None;
-                        }
-                    }
-                    save_state_settings();
-                    render_layered();
-                    sync_tray_icons(hwnd);
+                IDM_COLORS_DIALOG => {
+                    show_color_settings_window(hwnd);
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
@@ -3008,19 +3529,6 @@ fn show_context_menu(hwnd: HWND) {
 
         // Models submenu
         let models_menu = CreatePopupMenu().unwrap();
-        let claude_model = native_interop::wide_str(strings.claude_code_model);
-        let claude_flags = if show_claude_code {
-            MF_CHECKED
-        } else {
-            MENU_ITEM_FLAGS(0)
-        };
-        let _ = AppendMenuW(
-            models_menu,
-            claude_flags,
-            IDM_MODEL_CLAUDE_CODE as usize,
-            PCWSTR::from_raw(claude_model.as_ptr()),
-        );
-
         let codex_model = native_interop::wide_str(strings.codex_model);
         let codex_flags = if show_codex {
             MF_CHECKED
@@ -3032,6 +3540,19 @@ fn show_context_menu(hwnd: HWND) {
             codex_flags,
             IDM_MODEL_CODEX as usize,
             PCWSTR::from_raw(codex_model.as_ptr()),
+        );
+
+        let claude_model = native_interop::wide_str(strings.claude_code_model);
+        let claude_flags = if show_claude_code {
+            MF_CHECKED
+        } else {
+            MENU_ITEM_FLAGS(0)
+        };
+        let _ = AppendMenuW(
+            models_menu,
+            claude_flags,
+            IDM_MODEL_CLAUDE_CODE as usize,
+            PCWSTR::from_raw(claude_model.as_ptr()),
         );
 
         let antigravity_model = native_interop::wide_str(strings.antigravity_model);
@@ -3079,41 +3600,11 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(reset_pos_str.as_ptr()),
         );
 
-        let colors_menu = CreatePopupMenu().unwrap();
-        let fill_color = native_interop::wide_str(label_fill_color(language));
-        let _ = AppendMenuW(
-            colors_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_COLOR_FILL as usize,
-            PCWSTR::from_raw(fill_color.as_ptr()),
-        );
-        let clock_color = native_interop::wide_str(label_clock_color(language));
-        let _ = AppendMenuW(
-            colors_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_COLOR_CLOCK as usize,
-            PCWSTR::from_raw(clock_color.as_ptr()),
-        );
-        let text_color = native_interop::wide_str(label_text_color(language));
-        let _ = AppendMenuW(
-            colors_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_COLOR_TEXT as usize,
-            PCWSTR::from_raw(text_color.as_ptr()),
-        );
-        let _ = AppendMenuW(colors_menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let reset_colors = native_interop::wide_str(label_reset_colors(language));
-        let _ = AppendMenuW(
-            colors_menu,
-            MENU_ITEM_FLAGS(0),
-            IDM_COLOR_RESET as usize,
-            PCWSTR::from_raw(reset_colors.as_ptr()),
-        );
         let colors_label = native_interop::wide_str(label_colors(language));
         let _ = AppendMenuW(
             settings_menu,
-            MF_POPUP,
-            colors_menu.0 as usize,
+            MENU_ITEM_FLAGS(0),
+            IDM_COLORS_DIALOG as usize,
             PCWSTR::from_raw(colors_label.as_ptr()),
         );
 
@@ -3273,7 +3764,8 @@ fn paint(hdc: HDC, hwnd: HWND) {
         show_claude_code,
         show_codex,
         show_antigravity,
-        custom_fill_color,
+        custom_codex_fill_color,
+        custom_claude_fill_color,
         custom_clock_color,
         custom_text_color,
     ) = {
@@ -3297,7 +3789,8 @@ fn paint(hdc: HDC, hwnd: HWND) {
                 s.show_claude_code,
                 s.show_codex,
                 s.show_antigravity,
-                s.custom_fill_color,
+                s.custom_codex_fill_color,
+                s.custom_claude_fill_color,
                 s.custom_clock_color,
                 s.custom_text_color,
             ),
@@ -3305,9 +3798,9 @@ fn paint(hdc: HDC, hwnd: HWND) {
         }
     };
 
-    let accent = custom_fill_color.unwrap_or_else(claude_accent_color);
-    let codex_accent = custom_fill_color.unwrap_or_else(codex_accent_color);
-    let antigravity_accent = custom_fill_color.unwrap_or_else(antigravity_accent_color);
+    let accent = custom_claude_fill_color.unwrap_or_else(claude_accent_color);
+    let codex_accent = custom_codex_fill_color.unwrap_or_else(codex_accent_color);
+    let antigravity_accent = antigravity_accent_color();
     let track = custom_clock_color.unwrap_or_else(|| default_clock_color(is_dark));
     let text_color = custom_text_color.unwrap_or_else(|| default_text_color(is_dark));
     let bg_color = if is_dark {
@@ -3371,7 +3864,7 @@ fn draw_row(
     hdc: HDC,
     x: i32,
     y: i32,
-    is_dark: bool,
+    _is_dark: bool,
     text_color: &Color,
     label: &str,
     claude_percent: f64,
@@ -3388,25 +3881,18 @@ fn draw_row(
     antigravity_accent: &Color,
     track: &Color,
 ) {
-    let row_h = sc(CLOCK_SIZE);
     let active_models = active_model_count(show_claude_code, show_codex, show_antigravity);
+    let clock_size = sc(if active_models <= 1 {
+        LARGE_CLOCK_SIZE
+    } else {
+        CLOCK_SIZE
+    });
+    let row_h = clock_size;
     let segment_count = 10;
-    let use_model_text_colors = active_models > 1;
-    let claude_value_color = if use_model_text_colors {
-        claude_usage_text_color(is_dark)
-    } else {
-        *text_color
-    };
-    let codex_value_color = if use_model_text_colors {
-        codex_usage_text_color(is_dark)
-    } else {
-        *text_color
-    };
-    let antigravity_value_color = if use_model_text_colors {
-        antigravity_usage_text_color(is_dark)
-    } else {
-        *text_color
-    };
+    let reset_text = reset_time_text(codex_text)
+        .or_else(|| reset_time_text(claude_text))
+        .or_else(|| reset_time_text(antigravity_text))
+        .unwrap_or_else(|| "--".to_string());
 
     unsafe {
         let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
@@ -3424,69 +3910,111 @@ fn draw_row(
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
 
-        let mut model_x = x + sc(LABEL_WIDTH) + sc(LABEL_RIGHT_MARGIN);
-        if show_claude_code {
-            draw_usage_bar(
-                hdc,
-                model_x,
-                y,
-                segment_count,
-                claude_percent,
-                claude_text,
-                claude_accent,
-                track,
-                &claude_value_color,
-            );
-            model_x += model_usage_width(segment_count) + sc(MODEL_RIGHT_MARGIN);
-        }
+        let reset_x = x + sc(LABEL_WIDTH) + sc(LABEL_RIGHT_MARGIN);
+        let mut reset_wide: Vec<u16> = reset_text.encode_utf16().collect();
+        let mut reset_rect = RECT {
+            left: reset_x,
+            top: y,
+            right: reset_x + sc(RESET_WIDTH),
+            bottom: y + row_h,
+        };
+        let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+        let _ = DrawTextW(
+            hdc,
+            &mut reset_wide,
+            &mut reset_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        let mut model_x = reset_x + sc(RESET_WIDTH) + sc(LABEL_RIGHT_MARGIN);
         if show_codex {
-            draw_usage_bar(
+            draw_model_value(
                 hdc,
                 model_x,
                 y,
+                clock_size,
                 segment_count,
                 codex_percent,
-                codex_text,
+                &percent_text(codex_text),
                 codex_accent,
                 track,
-                &codex_value_color,
+                text_color,
+                active_models,
             );
-            model_x += model_usage_width(segment_count) + sc(MODEL_RIGHT_MARGIN);
+            model_x += model_usage_width_for(active_models) + sc(MODEL_RIGHT_MARGIN);
         }
-        if show_antigravity {
-            draw_usage_bar(
+        if show_claude_code {
+            draw_model_value(
                 hdc,
                 model_x,
                 y,
+                clock_size,
+                segment_count,
+                claude_percent,
+                &percent_text(claude_text),
+                claude_accent,
+                track,
+                text_color,
+                active_models,
+            );
+            model_x += model_usage_width_for(active_models) + sc(MODEL_RIGHT_MARGIN);
+        }
+        if show_antigravity {
+            draw_model_value(
+                hdc,
+                model_x,
+                y,
+                clock_size,
                 segment_count,
                 antigravity_percent,
-                antigravity_text,
+                &percent_text(antigravity_text),
                 antigravity_accent,
                 track,
-                &antigravity_value_color,
+                text_color,
+                active_models,
             );
         }
     }
 }
 
-fn model_usage_width(segment_count: i32) -> i32 {
-    let _ = segment_count;
-    sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(TEXT_WIDTH)
+fn model_usage_width_for(active_models: i32) -> i32 {
+    if active_models <= 1 {
+        sc(LARGE_CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(LARGE_MODEL_PERCENT_WIDTH)
+    } else {
+        sc(CLOCK_SIZE) + sc(CLOCK_TEXT_GAP) + sc(MODEL_PERCENT_WIDTH)
+    }
 }
 
-fn draw_usage_bar(
+fn percent_text(text: &str) -> String {
+    text.split('·')
+        .next()
+        .unwrap_or(text)
+        .split_whitespace()
+        .next()
+        .unwrap_or(text)
+        .trim()
+        .to_string()
+}
+
+fn reset_time_text(text: &str) -> Option<String> {
+    text.split_once('·')
+        .map(|(_, reset)| reset.trim().to_string())
+        .filter(|reset| !reset.is_empty())
+}
+
+fn draw_model_value(
     hdc: HDC,
     bar_x: i32,
     y: i32,
+    clock_size: i32,
     segment_count: i32,
     percent: f64,
     text: &str,
     accent: &Color,
     track: &Color,
     text_color: &Color,
+    active_models: i32,
 ) {
-    let clock_size = sc(CLOCK_SIZE);
-
     unsafe {
         draw_clock(
             hdc,
@@ -3504,7 +4032,12 @@ fn draw_usage_bar(
         let mut text_rect = RECT {
             left: text_x,
             top: y,
-            right: text_x + sc(TEXT_WIDTH),
+            right: text_x
+                + if active_models <= 1 {
+                    sc(LARGE_MODEL_PERCENT_WIDTH)
+                } else {
+                    sc(MODEL_PERCENT_WIDTH)
+                },
             bottom: y + clock_size,
         };
         let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
