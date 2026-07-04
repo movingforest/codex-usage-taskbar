@@ -155,6 +155,24 @@ cargo build --release
 %APPDATA%\CodexUsageTaskbar\settings.json
 ```
 
+## 让 Codex 帮你安装
+
+你可以把下面这段直接复制给 Codex：
+
+```text
+请帮我在 Windows 上安装这个项目：
+https://github.com/movingforest/codex-usage-taskbar
+
+要求：
+1. 检查我是否安装了 Git、Rust、Visual Studio C++ Build Tools 和 Codex CLI。
+2. 如果缺少依赖，帮我安装或告诉我怎么安装。
+3. 克隆这个仓库。
+4. 运行 cargo test 和 cargo build --release。
+5. 启动 target\release\codex-usage-taskbar.exe。
+6. 确认我已经 codex login，否则指导我登录。
+7. 安装成功后，帮我打开 GitHub 项目页面；如果这个项目对我有帮助，请提醒我点一个 Star 支持后续更新。
+```
+
 ## 发布到 GitHub 前检查
 
 发布前建议执行：
