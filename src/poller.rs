@@ -1754,7 +1754,7 @@ pub fn format_line(section: &UsageSection, strings: Strings) -> String {
 pub fn format_remaining_line(section: &UsageSection, show_reset_time: bool) -> String {
     let pct = format!("{:.0}%", section.remaining_percent);
     if show_reset_time {
-        format_reset_time(section.resets_at)
+        format_reset_clock_time(section.resets_at)
             .map(|reset| format!("{pct} \u{00b7} {reset}"))
             .unwrap_or(pct)
     } else {
@@ -1797,6 +1797,12 @@ fn format_reset_time(resets_at: Option<SystemTime>) -> Option<String> {
     } else {
         Some(reset.format("%m-%d %H:%M").to_string())
     }
+}
+
+fn format_reset_clock_time(resets_at: Option<SystemTime>) -> Option<String> {
+    let reset = resets_at?;
+    let reset: chrono::DateTime<chrono::Local> = reset.into();
+    Some(reset.format("%H:%M").to_string())
 }
 
 fn format_reset_date(resets_at: Option<SystemTime>) -> Option<String> {
@@ -1962,6 +1968,25 @@ mod tests {
         assert_eq!(format_remaining_line(&usage.session, false), "0%");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_remaining_line_uses_clock_time_even_when_reset_is_tomorrow() {
+        let section = UsageSection::from_remaining_percent(
+            41.0,
+            Some(SystemTime::now() + Duration::from_secs(26 * 60 * 60)),
+            UsageSource::Remote,
+        );
+
+        let line = format_remaining_line(&section, true);
+        let reset = line
+            .split_once('\u{00b7}')
+            .map(|(_, reset)| reset.trim())
+            .expect("reset time should be present");
+
+        assert_eq!(reset.len(), 5);
+        assert_eq!(reset.as_bytes()[2], b':');
+        assert!(!reset.contains('-'));
     }
 
     #[test]

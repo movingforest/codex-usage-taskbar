@@ -2,9 +2,11 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::Local;
 
 struct DiagnoseState {
+    path: PathBuf,
     file: Mutex<File>,
 }
 
@@ -15,15 +17,17 @@ pub fn init() -> Result<PathBuf, String> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
+        .append(true)
         .open(&path)
         .map_err(|e| format!("Unable to open diagnostic log file {}: {e}", path.display()))?;
 
     let _ = DIAGNOSE_STATE.set(DiagnoseState {
+        path: path.clone(),
         file: Mutex::new(file),
     });
 
     log("diagnostic logging enabled");
+    log("session start");
     Ok(path)
 }
 
@@ -31,15 +35,19 @@ pub fn is_enabled() -> bool {
     DIAGNOSE_STATE.get().is_some()
 }
 
+pub fn log_path() -> PathBuf {
+    DIAGNOSE_STATE
+        .get()
+        .map(|state| state.path.clone())
+        .unwrap_or_else(|| std::env::temp_dir().join("codex-usage-taskbar.log"))
+}
+
 pub fn log(message: impl AsRef<str>) {
     let Some(state) = DIAGNOSE_STATE.get() else {
         return;
     };
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
 
     if let Ok(mut file) = state.file.lock() {
         let _ = writeln!(file, "[{timestamp}] {}", message.as_ref());

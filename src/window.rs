@@ -11,10 +11,10 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
-use windows::Win32::UI::Controls::Dialogs::*;
+use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
-use windows::Win32::UI::Shell::ExtractIconExW;
+use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
@@ -97,6 +97,7 @@ struct AppState {
 
     widget_visible: bool,
     color_window_hwnd: Option<SendHwnd>,
+    about_window_hwnd: Option<SendHwnd>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,18 +140,14 @@ const IDM_MODEL_CLAUDE_CODE: u16 = 60;
 const IDM_MODEL_CODEX: u16 = 61;
 const IDM_MODEL_ANTIGRAVITY: u16 = 62;
 const IDM_COLORS_DIALOG: u16 = 80;
+const IDM_ABOUT_DIALOG: u16 = 81;
 const IDM_SCREEN_BASE: u16 = 100;
 const IDM_SCREEN_MAX: u16 = IDM_SCREEN_BASE + 32;
-const IDC_COLOR_CODEX: u16 = 200;
-const IDC_COLOR_CLAUDE: u16 = 201;
-const IDC_COLOR_CLOCK: u16 = 202;
-const IDC_COLOR_TEXT: u16 = 203;
-const IDC_COLOR_APPLY: u16 = 204;
-const IDC_COLOR_RESET: u16 = 205;
-const IDC_COLOR_CLOSE: u16 = 206;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
+const WM_APP_SHOW_SETTINGS: u32 = WM_APP + 4;
+const WM_APP_SHOW_ABOUT: u32 = WM_APP + 5;
 const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 
 /// How often the watchdog thread polls for an explorer.exe restart (which
@@ -188,6 +185,7 @@ fn refresh_dpi() {
 /// crash-looping); when detected we back off instead of spawning in a tight loop.
 const RELAUNCH_THROTTLE_SECS: u64 = 10;
 const RELAUNCH_BACKOFF_SECS: u64 = 30;
+const POSITION_SETTINGS_VERSION: u32 = 1;
 /// Environment flag set on a relaunched child so it waits for the previous
 /// instance's single-instance mutex instead of exiting immediately.
 const ENV_RELAUNCH: &str = "CCUM_RELAUNCH";
@@ -319,109 +317,91 @@ fn color_to_hex(color: Color) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
 }
 
-fn color_from_colorref(color: COLORREF) -> Color {
-    let value = color.0;
-    Color {
-        r: (value & 0xFF) as u8,
-        g: ((value >> 8) & 0xFF) as u8,
-        b: ((value >> 16) & 0xFF) as u8,
-    }
-}
-
-fn choose_color(hwnd: HWND, initial: Color) -> Option<Color> {
-    unsafe {
-        let mut custom_colors = [COLORREF(0x00FF_FFFF); 16];
-        let mut chooser = CHOOSECOLORW {
-            lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
-            hwndOwner: hwnd,
-            rgbResult: COLORREF(initial.to_colorref()),
-            lpCustColors: custom_colors.as_mut_ptr(),
-            Flags: CC_FULLOPEN | CC_RGBINIT,
-            ..Default::default()
-        };
-
-        if ChooseColorW(&mut chooser).as_bool() {
-            Some(color_from_colorref(chooser.rgbResult))
-        } else {
-            None
-        }
-    }
-}
-
 fn label_colors(language: LanguageId) -> &'static str {
     if matches!(language, LanguageId::SimplifiedChinese) {
-        "颜色"
+        "颜色设置"
     } else {
-        "Colors"
+        "Color Settings"
     }
 }
 
-fn label_codex_fill_color(language: LanguageId) -> &'static str {
+fn label_about(language: LanguageId) -> &'static str {
     if matches!(language, LanguageId::SimplifiedChinese) {
-        "Codex 填充色"
+        "关于"
     } else {
-        "Codex Fill"
+        "About"
     }
 }
 
-fn label_claude_fill_color(language: LanguageId) -> &'static str {
+fn label_open_log(language: LanguageId) -> &'static str {
     if matches!(language, LanguageId::SimplifiedChinese) {
-        "Claude 填充色"
+        "打开日志"
     } else {
-        "Claude Fill"
-    }
-}
-
-fn label_clock_color(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "时钟底色"
-    } else {
-        "Clock Base Color"
-    }
-}
-
-fn label_text_color(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "文字颜色"
-    } else {
-        "Text Color"
-    }
-}
-
-fn label_reset_colors(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "重置默认"
-    } else {
-        "Reset Colors"
-    }
-}
-
-fn label_preview(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "预览"
-    } else {
-        "Preview"
-    }
-}
-
-fn label_apply(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "应用"
-    } else {
-        "Apply"
-    }
-}
-
-fn label_close(language: LanguageId) -> &'static str {
-    if matches!(language, LanguageId::SimplifiedChinese) {
-        "关闭"
-    } else {
-        "Close"
+        "Open Log"
     }
 }
 
 fn color_dialog_size() -> (i32, i32) {
-    (sc(360), sc(282))
+    (sc(720), sc(560))
+}
+
+fn about_dialog_size() -> (i32, i32) {
+    (sc(520), sc(340))
+}
+
+fn settings_window_rect(owner: HWND) -> (i32, i32, i32, i32) {
+    unsafe {
+        let monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            info.rcWork
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN),
+                bottom: GetSystemMetrics(SM_CYSCREEN),
+            }
+        };
+
+        let (base_width, base_height) = color_dialog_size();
+        let margin = sc(24).max(16);
+        let available_width = (work.right - work.left - margin * 2).max(sc(540));
+        let available_height = (work.bottom - work.top - margin * 2).max(sc(420));
+        let width = base_width.min(available_width);
+        let height = base_height.min(available_height);
+        let x = work.left + ((work.right - work.left) - width) / 2;
+        let y = work.top + ((work.bottom - work.top) - height) / 2;
+        (x, y, width, height)
+    }
+}
+
+fn about_window_rect(owner: HWND) -> (i32, i32, i32, i32) {
+    unsafe {
+        let monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            info.rcWork
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN),
+                bottom: GetSystemMetrics(SM_CYSCREEN),
+            }
+        };
+
+        let (width, height) = about_dialog_size();
+        let x = work.left + ((work.right - work.left) - width) / 2;
+        let y = work.top + ((work.bottom - work.top) - height) / 2;
+        (x, y, width, height)
+    }
 }
 
 fn show_color_settings_window(owner: HWND) {
@@ -438,7 +418,7 @@ fn show_color_settings_window(owner: HWND) {
         }
 
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
-        let class_name = native_interop::wide_str("CodexUsageColorSettings");
+        let class_name = native_interop::wide_str("CodexUsageSettingsPanel");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -451,9 +431,7 @@ fn show_color_settings_window(owner: HWND) {
         };
         let _ = RegisterClassExW(&wc);
 
-        let (width, height) = color_dialog_size();
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
+        let (x, y, width, height) = settings_window_rect(owner);
         let title = {
             let state = lock_state();
             let language = state
@@ -462,22 +440,29 @@ fn show_color_settings_window(owner: HWND) {
                 .unwrap_or(LanguageId::English);
             native_interop::wide_str(label_colors(language))
         };
+        let local_state = Box::into_raw(Box::new(initial_color_settings_state()));
 
-        let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        let hwnd = match CreateWindowExW(
+            WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
-            pt.x - width / 2,
-            pt.y - height - sc(12),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
             width,
             height,
-            owner,
+            HWND::default(),
             HMENU::default(),
             hinstance,
-            None,
-        )
-        .unwrap();
+            Some(local_state as *const std::ffi::c_void),
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                drop(Box::from_raw(local_state));
+                diagnose::log_error("unable to create color settings window", error);
+                return;
+            }
+        };
 
         {
             let mut state = lock_state();
@@ -488,111 +473,572 @@ fn show_color_settings_window(owner: HWND) {
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
+        let _ = UpdateWindow(hwnd);
     }
 }
 
-unsafe extern "system" fn color_settings_wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            paint_color_settings(hdc, hwnd);
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
+fn show_about_window(owner: HWND) {
+    unsafe {
+        if let Some(existing) = lock_state()
+            .as_ref()
+            .and_then(|state| state.about_window_hwnd)
+            .map(|hwnd| hwnd.to_hwnd())
+            .filter(|hwnd| IsWindow(*hwnd).as_bool())
+        {
+            let _ = ShowWindow(existing, SW_SHOW);
+            let _ = SetForegroundWindow(existing);
+            return;
         }
-        WM_LBUTTONUP => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            handle_color_settings_click(hwnd, x, y);
-            LRESULT(0)
-        }
-        WM_COMMAND => {
-            if (wparam.0 as u16) == IDC_COLOR_CLOSE {
-                let _ = DestroyWindow(hwnd);
+
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let class_name = native_interop::wide_str("CodexUsageAboutPanel");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(about_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        let (x, y, width, height) = about_window_rect(owner);
+        let title = {
+            let state = lock_state();
+            let language = state
+                .as_ref()
+                .map(|s| s.language)
+                .unwrap_or(LanguageId::English);
+            native_interop::wide_str(label_about(language))
+        };
+
+        let hwnd = match CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
+            width,
+            height,
+            HWND::default(),
+            HMENU::default(),
+            hinstance,
+            None,
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                diagnose::log_error("unable to create about window", error);
+                return;
             }
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
+        };
+
+        {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
-                s.color_window_hwnd = None;
+                s.about_window_hwnd = Some(SendHwnd::from_hwnd(hwnd));
             }
-            LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = UpdateWindow(hwnd);
     }
 }
 
-fn paint_color_settings(hdc: HDC, _hwnd: HWND) {
-    let (language, is_dark, codex_fill, claude_fill, clock_color, text_color) = {
+#[derive(Clone, Copy)]
+struct ColorSettingsState {
+    colors: [Color; 4],
+    is_dark: bool,
+    language: LanguageId,
+}
+
+#[derive(Default)]
+struct ColorSettingsLayout {
+    rows: [RECT; 4],
+    value_buttons: [RECT; 4],
+    palettes: [[RECT; 8]; 4],
+    more_buttons: [RECT; 4],
+    apply_button: RECT,
+    reset_button: RECT,
+    close_button: RECT,
+}
+
+#[derive(Default)]
+struct AboutLayout {
+    open_log_button: RECT,
+}
+
+const COLOR_ROW_LABELS: [&str; 4] = ["Codex Fill", "Claude Fill", "Clock Base", "Text"];
+const COLOR_PALETTES: [[&str; 8]; 4] = [
+    [
+        "#155EEF", "#2563EB", "#4F46E5", "#7C3AED", "#0E9384", "#EAAA08", "#E04F16", "#667085",
+    ],
+    [
+        "#FF8C42", "#F97316", "#D97757", "#A16207", "#16A34A", "#64748B", "#475467", "#1F2937",
+    ],
+    [
+        "#D8DEE9", "#E5E7EB", "#CBD5E1", "#94A3B8", "#475467", "#F4F7FB", "#FFFFFF", "#111827",
+    ],
+    [
+        "#1F2328", "#344054", "#475467", "#667085", "#0F172A", "#155EEF", "#D92D20", "#FFFFFF",
+    ],
+];
+
+fn initial_color_settings_state() -> ColorSettingsState {
+    {
         let state = lock_state();
         match state.as_ref() {
+            Some(s) => ColorSettingsState {
+                colors: [
+                    s.custom_codex_fill_color.unwrap_or_else(codex_accent_color),
+                    s.custom_claude_fill_color
+                        .unwrap_or_else(claude_accent_color),
+                    s.custom_clock_color
+                        .unwrap_or_else(|| default_clock_color(s.is_dark)),
+                    s.custom_text_color
+                        .unwrap_or_else(|| default_text_color(s.is_dark)),
+                ],
+                is_dark: s.is_dark,
+                language: s.language,
+            },
+            None => ColorSettingsState {
+                colors: [
+                    codex_accent_color(),
+                    claude_accent_color(),
+                    default_clock_color(false),
+                    default_text_color(false),
+                ],
+                is_dark: false,
+                language: LanguageId::English,
+            },
+        }
+    }
+}
+
+fn color_settings_state(hwnd: HWND) -> Option<&'static mut ColorSettingsState> {
+    unsafe {
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ColorSettingsState;
+        ptr.as_mut()
+    }
+}
+
+fn color_settings_layout(width: i32, height: i32) -> ColorSettingsLayout {
+    let mut layout = ColorSettingsLayout::default();
+    let left = sc(24);
+    let right = width - sc(24);
+    let row_h = sc(48);
+    let mut y = sc(220);
+    for row in 0..4 {
+        layout.rows[row] = RECT {
+            left,
+            top: y,
+            right,
+            bottom: y + row_h,
+        };
+        layout.value_buttons[row] = RECT {
+            left: left + sc(168),
+            top: y + sc(6),
+            right: left + sc(314),
+            bottom: y + row_h - sc(6),
+        };
+        let chip_start = left + sc(350);
+        for chip in 0..8 {
+            let x = chip_start + chip as i32 * sc(25);
+            layout.palettes[row][chip] = RECT {
+                left: x,
+                top: y + sc(15),
+                right: x + sc(16),
+                bottom: y + sc(31),
+            };
+        }
+        layout.more_buttons[row] = RECT {
+            left: right - sc(34),
+            top: y + sc(8),
+            right: right - sc(2),
+            bottom: y + row_h - sc(8),
+        };
+        y += row_h + sc(8);
+    }
+
+    let button_y = height - sc(58);
+    layout.apply_button = RECT {
+        left: right - sc(344),
+        top: button_y,
+        right: right - sc(228),
+        bottom: button_y + sc(38),
+    };
+    layout.reset_button = RECT {
+        left: right - sc(216),
+        top: button_y,
+        right: right - sc(100),
+        bottom: button_y + sc(38),
+    };
+    layout.close_button = RECT {
+        left: right - sc(88),
+        top: button_y,
+        right,
+        bottom: button_y + sc(38),
+    };
+    layout
+}
+
+fn draw_text_in_rect(hdc: HDC, text: &str, mut rect: RECT, color: Color, flags: DRAW_TEXT_FORMAT) {
+    unsafe {
+        let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let _ = DrawTextW(hdc, &mut wide, &mut rect, flags);
+    }
+}
+
+fn draw_wrapped_text(hdc: HDC, text: &str, rect: RECT, color: Color) -> i32 {
+    unsafe {
+        let mut measured = rect;
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut wide,
+            &mut measured,
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT,
+        );
+        let bottom = measured.bottom;
+        draw_text_in_rect(
+            hdc,
+            text,
+            RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom,
+            },
+            color,
+            DT_LEFT | DT_TOP | DT_WORDBREAK,
+        );
+        bottom
+    }
+}
+
+fn fill_rect_color(hdc: HDC, rect: &RECT, color: Color) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
+        FillRect(hdc, rect, brush);
+        let _ = DeleteObject(brush);
+    }
+}
+
+fn draw_panel(hdc: HDC, rect: RECT, fill: Color, border: Color) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(fill.to_colorref()));
+        let pen = CreatePen(PS_SOLID, sc(1), COLORREF(border.to_colorref()));
+        let old_brush = SelectObject(hdc, brush);
+        let old_pen = SelectObject(hdc, pen);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            sc(12),
+            sc(12),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(pen);
+        let _ = DeleteObject(brush);
+    }
+}
+
+fn draw_button(hdc: HDC, rect: RECT, label: &str, primary: bool) {
+    let fill = if primary {
+        Color::from_hex("#155EEF")
+    } else {
+        Color::from_hex("#F8FAFC")
+    };
+    let border = if primary {
+        Color::from_hex("#155EEF")
+    } else {
+        Color::from_hex("#CDD5E1")
+    };
+    let text = if primary {
+        Color::from_hex("#FFFFFF")
+    } else {
+        Color::from_hex("#1F2328")
+    };
+    draw_panel(hdc, rect, fill, border);
+    draw_text_in_rect(
+        hdc,
+        label,
+        rect,
+        text,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+fn draw_color_chip(hdc: HDC, rect: RECT, color: Color) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
+        let pen = CreatePen(
+            PS_SOLID,
+            sc(1),
+            COLORREF(native_interop::colorref(160, 170, 185)),
+        );
+        let old_brush = SelectObject(hdc, brush);
+        let old_pen = SelectObject(hdc, pen);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            sc(4),
+            sc(4),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(pen);
+        let _ = DeleteObject(brush);
+    }
+}
+
+fn draw_color_value(hdc: HDC, rect: RECT, color: Color) {
+    draw_panel(
+        hdc,
+        rect,
+        Color::from_hex("#F8FBFF"),
+        Color::from_hex("#CDD5E1"),
+    );
+    draw_color_chip(
+        hdc,
+        RECT {
+            left: rect.left + sc(10),
+            top: rect.top + sc(8),
+            right: rect.left + sc(34),
+            bottom: rect.bottom - sc(8),
+        },
+        color,
+    );
+    draw_text_in_rect(
+        hdc,
+        &color_to_hex(color),
+        RECT {
+            left: rect.left + sc(44),
+            top: rect.top,
+            right: rect.right - sc(8),
+            bottom: rect.bottom,
+        },
+        Color::from_hex("#1F2328"),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+fn draw_color_dot(hdc: HDC, rect: RECT, color: Color) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
+        let pen = CreatePen(
+            PS_SOLID,
+            sc(1),
+            COLORREF(native_interop::colorref(100, 110, 125)),
+        );
+        let old_brush = SelectObject(hdc, brush);
+        let old_pen = SelectObject(hdc, pen);
+        let _ = Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(pen);
+        let _ = DeleteObject(brush);
+    }
+}
+
+fn draw_preview_row(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    label: &str,
+    reset: &str,
+    codex_pct: f64,
+    codex_text: &str,
+    claude_pct: f64,
+    claude_text: &str,
+    colors: &[Color; 4],
+) {
+    let text = colors[3];
+    draw_text_in_rect(
+        hdc,
+        label,
+        RECT {
+            left: x,
+            top: y,
+            right: x + sc(38),
+            bottom: y + sc(28),
+        },
+        text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text_in_rect(
+        hdc,
+        reset,
+        RECT {
+            left: x + sc(58),
+            top: y,
+            right: x + sc(126),
+            bottom: y + sc(28),
+        },
+        text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_clock(
+        hdc,
+        x + sc(154),
+        y,
+        sc(28),
+        codex_pct,
+        10,
+        &colors[0],
+        &colors[2],
+    );
+    draw_text_in_rect(
+        hdc,
+        codex_text,
+        RECT {
+            left: x + sc(188),
+            top: y,
+            right: x + sc(240),
+            bottom: y + sc(28),
+        },
+        text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_clock(
+        hdc,
+        x + sc(258),
+        y,
+        sc(28),
+        claude_pct,
+        10,
+        &colors[1],
+        &colors[2],
+    );
+    draw_text_in_rect(
+        hdc,
+        claude_text,
+        RECT {
+            left: x + sc(292),
+            top: y,
+            right: x + sc(344),
+            bottom: y + sc(28),
+        },
+        text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+}
+
+fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
+    let widget_w = (rect.right - rect.left - sc(64)).min(sc(560));
+    let widget_h = sc(92);
+    let x = rect.left + (rect.right - rect.left - widget_w) / 2;
+    let y = rect.top + (rect.bottom - rect.top - widget_h) / 2;
+    let widget = RECT {
+        left: x,
+        top: y,
+        right: x + widget_w,
+        bottom: y + widget_h,
+    };
+    draw_panel(
+        hdc,
+        widget,
+        Color::from_hex("#F8FBFF"),
+        Color::from_hex("#CDD5E1"),
+    );
+
+    let (
+        codex_session_pct,
+        codex_session_text,
+        codex_weekly_pct,
+        codex_weekly_text,
+        claude_session_pct,
+        claude_session_text,
+        claude_weekly_pct,
+        claude_weekly_text,
+    ) = {
+        let app = lock_state();
+        match app.as_ref() {
             Some(s) => (
-                s.language,
-                s.is_dark,
-                s.custom_codex_fill_color.unwrap_or_else(codex_accent_color),
-                s.custom_claude_fill_color
-                    .unwrap_or_else(claude_accent_color),
-                s.custom_clock_color
-                    .unwrap_or_else(|| default_clock_color(s.is_dark)),
-                s.custom_text_color
-                    .unwrap_or_else(|| default_text_color(s.is_dark)),
+                s.codex_session_percent,
+                s.codex_session_text.clone(),
+                s.codex_weekly_percent,
+                s.codex_weekly_text.clone(),
+                s.session_percent,
+                s.session_text.clone(),
+                s.weekly_percent,
+                s.weekly_text.clone(),
             ),
             None => (
-                LanguageId::English,
-                false,
-                codex_accent_color(),
-                claude_accent_color(),
-                default_clock_color(false),
-                default_text_color(false),
+                62.0,
+                "62% · 18:40".to_string(),
+                71.0,
+                "71% · 07-10".to_string(),
+                38.0,
+                "38% · 18:40".to_string(),
+                44.0,
+                "44% · 07-10".to_string(),
             ),
         }
     };
+    let reset_5h = reset_time_text(&codex_session_text)
+        .or_else(|| reset_time_text(&claude_session_text))
+        .unwrap_or_else(|| "18:40".to_string());
+    let reset_7d = reset_time_text(&codex_weekly_text)
+        .or_else(|| reset_time_text(&claude_weekly_text))
+        .unwrap_or_else(|| "07-10".to_string());
 
-    let bg = if is_dark {
-        Color::from_hex("#202020")
-    } else {
-        Color::from_hex("#F4F5F7")
-    };
-    let panel = if is_dark {
-        Color::from_hex("#2B2B2B")
-    } else {
-        Color::from_hex("#FFFFFF")
-    };
-    let border = if is_dark {
-        Color::from_hex("#3F3F3F")
-    } else {
-        Color::from_hex("#D7DCE3")
-    };
+    draw_preview_row(
+        hdc,
+        x + sc(28),
+        y + sc(16),
+        "5h",
+        &reset_5h,
+        codex_session_pct,
+        &percent_text(&codex_session_text),
+        claude_session_pct,
+        &percent_text(&claude_session_text),
+        &state.colors,
+    );
+    draw_preview_row(
+        hdc,
+        x + sc(28),
+        y + sc(54),
+        "7d",
+        &reset_7d,
+        codex_weekly_pct,
+        &percent_text(&codex_weekly_text),
+        claude_weekly_pct,
+        &percent_text(&claude_weekly_text),
+        &state.colors,
+    );
+}
 
+fn draw_color_settings(hwnd: HWND, hdc: HDC) {
+    let Some(state) = color_settings_state(hwnd) else {
+        return;
+    };
     unsafe {
-        let (width, height) = color_dialog_size();
-        let rect = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        };
-        let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
-        FillRect(hdc, &rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
+        let layout = color_settings_layout(width, height);
 
+        fill_rect_color(hdc, &client, Color::from_hex("#F4F7FB"));
+        let _ = SetBkMode(hdc, TRANSPARENT);
         let font_name = native_interop::wide_str("Segoe UI");
         let font = CreateFontW(
-            sc(-12),
+            sc(-15),
             0,
             0,
             0,
-            FW_MEDIUM.0 as i32,
+            FW_NORMAL.0 as i32,
             0,
             0,
             0,
@@ -604,357 +1050,439 @@ fn paint_color_settings(hdc: HDC, _hwnd: HWND) {
             PCWSTR::from_raw(font_name.as_ptr()),
         );
         let old_font = SelectObject(hdc, font);
-        let _ = SetBkMode(hdc, TRANSPARENT);
 
+        let text_color = Color::from_hex("#1F2328");
         draw_text_in_rect(
             hdc,
-            label_colors(language),
-            RECT {
-                left: sc(16),
-                top: sc(12),
-                right: sc(160),
-                bottom: sc(34),
-            },
-            &text_color,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-
-        draw_panel(
-            hdc,
-            RECT {
-                left: sc(14),
-                top: sc(40),
-                right: sc(346),
-                bottom: sc(88),
-            },
-            &panel,
-            &border,
-        );
-        draw_text_in_rect(
-            hdc,
-            label_preview(language),
+            "Preview",
             RECT {
                 left: sc(24),
-                top: sc(48),
-                right: sc(80),
-                bottom: sc(80),
+                top: sc(18),
+                right: width - sc(24),
+                bottom: sc(42),
             },
-            &text_color,
+            text_color,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+        let preview = RECT {
+            left: sc(24),
+            top: sc(46),
+            right: width - sc(24),
+            bottom: sc(188),
+        };
+        draw_panel(
+            hdc,
+            preview,
+            Color::from_hex("#F8FBFF"),
+            Color::from_hex("#CDD5E1"),
+        );
+        draw_preview_widget(hdc, state, preview);
 
-        let preview_x = sc(92);
-        draw_row(
-            hdc,
-            preview_x,
-            sc(47),
-            is_dark,
-            &text_color,
-            "5h",
-            38.0,
-            "62% · 18:40",
-            24.0,
-            "76% · 18:40",
-            0.0,
-            "--",
-            true,
-            true,
-            false,
-            &claude_fill,
-            &codex_fill,
-            &antigravity_accent_color(),
-            &clock_color,
-        );
-        draw_row(
-            hdc,
-            preview_x,
-            sc(66),
-            is_dark,
-            &text_color,
-            "7d",
-            42.0,
-            "58% · 07-10",
-            33.0,
-            "67% · 07-10",
-            0.0,
-            "--",
-            true,
-            true,
-            false,
-            &claude_fill,
-            &codex_fill,
-            &antigravity_accent_color(),
-            &clock_color,
-        );
+        for row in 0..4 {
+            let rect = layout.rows[row];
+            draw_panel(
+                hdc,
+                rect,
+                Color::from_hex("#FFFFFF"),
+                Color::from_hex("#E2E8F0"),
+            );
+            draw_color_dot(
+                hdc,
+                RECT {
+                    left: rect.left + sc(16),
+                    top: rect.top + sc(16),
+                    right: rect.left + sc(32),
+                    bottom: rect.top + sc(32),
+                },
+                state.colors[row],
+            );
+            draw_text_in_rect(
+                hdc,
+                COLOR_ROW_LABELS[row],
+                RECT {
+                    left: rect.left + sc(48),
+                    top: rect.top,
+                    right: rect.left + sc(160),
+                    bottom: rect.bottom,
+                },
+                text_color,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_color_value(hdc, layout.value_buttons[row], state.colors[row]);
+            for chip in 0..8 {
+                draw_color_chip(
+                    hdc,
+                    layout.palettes[row][chip],
+                    Color::from_hex(COLOR_PALETTES[row][chip]),
+                );
+            }
+            draw_button(hdc, layout.more_buttons[row], "...", false);
+        }
 
-        draw_color_row(
-            hdc,
-            language,
-            IDC_COLOR_CODEX,
-            label_codex_fill_color(language),
-            &codex_fill,
-            &panel,
-            &border,
-            &text_color,
-        );
-        draw_color_row(
-            hdc,
-            language,
-            IDC_COLOR_CLAUDE,
-            label_claude_fill_color(language),
-            &claude_fill,
-            &panel,
-            &border,
-            &text_color,
-        );
-        draw_color_row(
-            hdc,
-            language,
-            IDC_COLOR_CLOCK,
-            label_clock_color(language),
-            &clock_color,
-            &panel,
-            &border,
-            &text_color,
-        );
-        draw_color_row(
-            hdc,
-            language,
-            IDC_COLOR_TEXT,
-            label_text_color(language),
-            &text_color,
-            &panel,
-            &border,
-            &text_color,
-        );
-
-        draw_button(
-            hdc,
-            color_button_rect(IDC_COLOR_APPLY),
-            label_apply(language),
-            &panel,
-            &border,
-            &text_color,
-        );
-        draw_button(
-            hdc,
-            color_button_rect(IDC_COLOR_RESET),
-            label_reset_colors(language),
-            &panel,
-            &border,
-            &text_color,
-        );
-        draw_button(
-            hdc,
-            color_button_rect(IDC_COLOR_CLOSE),
-            label_close(language),
-            &panel,
-            &border,
-            &text_color,
-        );
+        draw_button(hdc, layout.apply_button, "Apply", true);
+        draw_button(hdc, layout.reset_button, "Reset", false);
+        draw_button(hdc, layout.close_button, "Close", false);
 
         SelectObject(hdc, old_font);
         let _ = DeleteObject(font);
     }
 }
 
-fn draw_color_row(
-    hdc: HDC,
-    _language: LanguageId,
-    id: u16,
-    label: &str,
-    color: &Color,
-    panel: &Color,
-    border: &Color,
-    text_color: &Color,
-) {
-    let swatch = color_swatch_rect(id);
-    let row_rect = RECT {
-        left: sc(14),
-        top: swatch.top - sc(6),
-        right: sc(346),
-        bottom: swatch.bottom + sc(6),
+fn point_in_rect(pt: POINT, rect: RECT) -> bool {
+    pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
+}
+
+fn pick_color(hwnd: HWND, current: Color) -> Option<Color> {
+    let mut custom_colors = [COLORREF(0); 16];
+    let mut cc = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: hwnd,
+        rgbResult: COLORREF(current.to_colorref()),
+        lpCustColors: custom_colors.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
     };
-    draw_panel(hdc, row_rect, panel, border);
-    draw_text_in_rect(
-        hdc,
-        label,
-        RECT {
-            left: sc(24),
-            top: row_rect.top,
-            right: sc(210),
-            bottom: row_rect.bottom,
-        },
-        text_color,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    draw_panel(hdc, swatch, color, border);
-    draw_text_in_rect(
-        hdc,
-        &color_to_hex(*color),
-        RECT {
-            left: sc(214),
-            top: row_rect.top,
-            right: swatch.left - sc(8),
-            bottom: row_rect.bottom,
-        },
-        text_color,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-    );
-}
-
-fn draw_button(hdc: HDC, rect: RECT, label: &str, bg: &Color, border: &Color, text: &Color) {
-    draw_panel(hdc, rect, bg, border);
-    draw_text_in_rect(
-        hdc,
-        label,
-        rect,
-        text,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-}
-
-fn draw_panel(hdc: HDC, rect: RECT, bg: &Color, border: &Color) {
     unsafe {
-        let brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
-        let pen = CreatePen(PS_SOLID, sc(1), COLORREF(border.to_colorref()));
-        let old_brush = SelectObject(hdc, brush);
-        let old_pen = SelectObject(hdc, pen);
-        let _ = RoundRect(
-            hdc,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            sc(8),
-            sc(8),
-        );
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        let _ = DeleteObject(pen);
-        let _ = DeleteObject(brush);
-    }
-}
-
-fn draw_text_in_rect(hdc: HDC, text: &str, mut rect: RECT, color: &Color, flags: DRAW_TEXT_FORMAT) {
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
-        let _ = DrawTextW(hdc, &mut wide, &mut rect, flags);
-    }
-}
-
-fn color_swatch_rect(id: u16) -> RECT {
-    let top = match id {
-        IDC_COLOR_CODEX => 98,
-        IDC_COLOR_CLAUDE => 130,
-        IDC_COLOR_CLOCK => 162,
-        IDC_COLOR_TEXT => 194,
-        _ => 98,
-    };
-    RECT {
-        left: sc(266),
-        top: sc(top),
-        right: sc(324),
-        bottom: sc(top + 20),
-    }
-}
-
-fn color_button_rect(id: u16) -> RECT {
-    let (left, right) = match id {
-        IDC_COLOR_APPLY => (154, 216),
-        IDC_COLOR_RESET => (222, 286),
-        IDC_COLOR_CLOSE => (292, 344),
-        _ => (0, 0),
-    };
-    RECT {
-        left: sc(left),
-        top: sc(238),
-        right: sc(right),
-        bottom: sc(264),
-    }
-}
-
-fn point_in_rect(x: i32, y: i32, rect: RECT) -> bool {
-    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
-}
-
-fn handle_color_settings_click(hwnd: HWND, x: i32, y: i32) {
-    for id in [
-        IDC_COLOR_CODEX,
-        IDC_COLOR_CLAUDE,
-        IDC_COLOR_CLOCK,
-        IDC_COLOR_TEXT,
-    ] {
-        if point_in_rect(x, y, color_swatch_rect(id)) {
-            let initial = {
-                let state = lock_state();
-                match state.as_ref() {
-                    Some(s) => match id {
-                        IDC_COLOR_CODEX => {
-                            s.custom_codex_fill_color.unwrap_or_else(codex_accent_color)
-                        }
-                        IDC_COLOR_CLAUDE => s
-                            .custom_claude_fill_color
-                            .unwrap_or_else(claude_accent_color),
-                        IDC_COLOR_CLOCK => s
-                            .custom_clock_color
-                            .unwrap_or_else(|| default_clock_color(s.is_dark)),
-                        IDC_COLOR_TEXT => s
-                            .custom_text_color
-                            .unwrap_or_else(|| default_text_color(s.is_dark)),
-                        _ => codex_accent_color(),
-                    },
-                    None => codex_accent_color(),
-                }
-            };
-            if let Some(color) = choose_color(hwnd, initial) {
-                {
-                    let mut state = lock_state();
-                    if let Some(s) = state.as_mut() {
-                        match id {
-                            IDC_COLOR_CODEX => s.custom_codex_fill_color = Some(color),
-                            IDC_COLOR_CLAUDE => s.custom_claude_fill_color = Some(color),
-                            IDC_COLOR_CLOCK => s.custom_clock_color = Some(color),
-                            IDC_COLOR_TEXT => s.custom_text_color = Some(color),
-                            _ => {}
-                        }
-                    }
-                }
-                save_state_settings();
-                render_layered();
-                unsafe {
-                    let _ = InvalidateRect(hwnd, None, true);
-                }
-            }
-            return;
+        if ChooseColorW(&mut cc).as_bool() {
+            let value = cc.rgbResult.0;
+            Some(Color::new(
+                (value & 0xFF) as u8,
+                ((value >> 8) & 0xFF) as u8,
+                ((value >> 16) & 0xFF) as u8,
+            ))
+        } else {
+            None
         }
     }
+}
 
-    if point_in_rect(x, y, color_button_rect(IDC_COLOR_APPLY)) {
-        save_state_settings();
-        unsafe {
-            let _ = DestroyWindow(hwnd);
+fn apply_color_settings(colors: [Color; 4]) {
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.custom_codex_fill_color = Some(colors[0]);
+            s.custom_claude_fill_color = Some(colors[1]);
+            s.custom_clock_color = Some(colors[2]);
+            s.custom_text_color = Some(colors[3]);
         }
-    } else if point_in_rect(x, y, color_button_rect(IDC_COLOR_RESET)) {
-        {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
+    }
+    save_state_settings();
+    render_layered();
+}
+
+fn reset_color_settings(hwnd: HWND) {
+    let (is_dark, language) = {
+        let mut state = lock_state();
+        match state.as_mut() {
+            Some(s) => {
                 s.custom_codex_fill_color = None;
                 s.custom_claude_fill_color = None;
                 s.custom_clock_color = None;
                 s.custom_text_color = None;
+                (s.is_dark, s.language)
             }
+            None => (false, LanguageId::English),
         }
-        save_state_settings();
-        render_layered();
-        unsafe {
-            let _ = InvalidateRect(hwnd, None, true);
+    };
+    if let Some(local) = color_settings_state(hwnd) {
+        local.colors = [
+            codex_accent_color(),
+            claude_accent_color(),
+            default_clock_color(is_dark),
+            default_text_color(is_dark),
+        ];
+        local.is_dark = is_dark;
+        local.language = language;
+    }
+    save_state_settings();
+    render_layered();
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
+}
+
+fn about_layout(width: i32, height: i32) -> AboutLayout {
+    let right = width - sc(24);
+    let button_y = height - sc(58);
+    AboutLayout {
+        open_log_button: RECT {
+            left: right - sc(128),
+            top: button_y,
+            right,
+            bottom: button_y + sc(38),
+        },
+    }
+}
+
+fn draw_about(hwnd: HWND, hdc: HDC) {
+    unsafe {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
+        let layout = about_layout(width, height);
+        let language = {
+            let state = lock_state();
+            state
+                .as_ref()
+                .map(|s| s.language)
+                .unwrap_or(LanguageId::English)
+        };
+
+        fill_rect_color(hdc, &client, Color::from_hex("#F4F7FB"));
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let font_name = native_interop::wide_str("Segoe UI");
+        let title_font = CreateFontW(
+            sc(-18),
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        );
+        let body_font = CreateFontW(
+            sc(-13),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        );
+
+        let panel = RECT {
+            left: sc(24),
+            top: sc(24),
+            right: width - sc(24),
+            bottom: height - sc(78),
+        };
+        draw_panel(
+            hdc,
+            panel,
+            Color::from_hex("#FFFFFF"),
+            Color::from_hex("#D7DFEC"),
+        );
+
+        let old_font = SelectObject(hdc, title_font);
+        draw_text_in_rect(
+            hdc,
+            "Codex Usage Taskbar",
+            RECT {
+                left: panel.left + sc(24),
+                top: panel.top + sc(20),
+                right: panel.right - sc(24),
+                bottom: panel.top + sc(50),
+            },
+            Color::from_hex("#1F2328"),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(hdc, body_font);
+
+        let intro = if matches!(language, LanguageId::SimplifiedChinese) {
+            "一个本地 Windows 任务栏小组件，用于显示 Codex 和 Claude 的 5 小时 / 7 天用量、剩余比例与重置时间。"
+        } else {
+            "A local Windows taskbar widget for Codex and Claude 5-hour / 7-day usage, remaining percentage, and reset time."
+        };
+        let mut y = panel.top + sc(66);
+        y = draw_wrapped_text(
+            hdc,
+            intro,
+            RECT {
+                left: panel.left + sc(24),
+                top: y,
+                right: panel.right - sc(24),
+                bottom: panel.bottom - sc(24),
+            },
+            Color::from_hex("#344054"),
+        );
+        y += sc(14);
+
+        let privacy = if matches!(language, LanguageId::SimplifiedChinese) {
+            "项目以本地运行和轻量显示为目标；诊断日志只写入本机临时目录。"
+        } else {
+            "Built for local use and lightweight display; diagnostic logs are written only to the local temp directory."
+        };
+        y = draw_wrapped_text(
+            hdc,
+            privacy,
+            RECT {
+                left: panel.left + sc(24),
+                top: y,
+                right: panel.right - sc(24),
+                bottom: panel.bottom - sc(24),
+            },
+            Color::from_hex("#667085"),
+        );
+        y += sc(18);
+
+        let author = if matches!(language, LanguageId::SimplifiedChinese) {
+            "作者：移动森林"
+        } else {
+            "Author: 移动森林"
+        };
+        let author_top = y.min(panel.bottom - sc(34));
+        draw_text_in_rect(
+            hdc,
+            author,
+            RECT {
+                left: panel.left + sc(24),
+                top: author_top,
+                right: panel.right - sc(24),
+                bottom: author_top + sc(24),
+            },
+            Color::from_hex("#1F2328"),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(title_font);
+        let _ = DeleteObject(body_font);
+
+        draw_button(hdc, layout.open_log_button, label_open_log(language), true);
+    }
+}
+
+unsafe extern "system" fn about_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    _wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            draw_about(hwnd, hdc);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
         }
-    } else if point_in_rect(x, y, color_button_rect(IDC_COLOR_CLOSE)) {
-        unsafe {
+        WM_LBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let pt = POINT { x, y };
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let layout = about_layout(client.right - client.left, client.bottom - client.top);
+            if point_in_rect(pt, layout.open_log_button) {
+                open_diagnostic_log(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
+            LRESULT(0)
         }
+        WM_DESTROY => {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.about_window_hwnd = None;
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, _wparam, lparam),
+    }
+}
+
+unsafe extern "system" fn color_settings_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCCREATE => {
+            let create = lparam.0 as *const CREATESTRUCTW;
+            if !create.is_null() {
+                let ptr = (*create).lpCreateParams as *mut ColorSettingsState;
+                if !ptr.is_null() {
+                    let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+                }
+            }
+            LRESULT(1)
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            draw_color_settings(hwnd, hdc);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let pt = POINT { x, y };
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let layout =
+                color_settings_layout(client.right - client.left, client.bottom - client.top);
+            if point_in_rect(pt, layout.apply_button) {
+                if let Some(state) = color_settings_state(hwnd) {
+                    apply_color_settings(state.colors);
+                }
+                return LRESULT(0);
+            }
+            if point_in_rect(pt, layout.reset_button) {
+                reset_color_settings(hwnd);
+                return LRESULT(0);
+            }
+            if point_in_rect(pt, layout.close_button) {
+                let _ = DestroyWindow(hwnd);
+                return LRESULT(0);
+            }
+            if let Some(state) = color_settings_state(hwnd) {
+                for row in 0..4 {
+                    if point_in_rect(pt, layout.value_buttons[row])
+                        || point_in_rect(pt, layout.more_buttons[row])
+                    {
+                        if let Some(color) = pick_color(hwnd, state.colors[row]) {
+                            state.colors[row] = color;
+                            let _ = InvalidateRect(hwnd, None, true);
+                        }
+                        return LRESULT(0);
+                    }
+                    for chip in 0..8 {
+                        if point_in_rect(pt, layout.palettes[row][chip]) {
+                            state.colors[row] = Color::from_hex(COLOR_PALETTES[row][chip]);
+                            let _ = InvalidateRect(hwnd, None, true);
+                            return LRESULT(0);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ColorSettingsState;
+            if !ptr.is_null() {
+                let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                drop(Box::from_raw(ptr));
+            }
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.color_window_hwnd = None;
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
@@ -992,6 +1520,8 @@ struct SettingsFile {
     #[serde(default = "default_tray_offset")]
     tray_offset: i32,
     #[serde(default)]
+    position_version: u32,
+    #[serde(default)]
     taskbar_index: usize,
     #[serde(default = "default_poll_interval")]
     poll_interval_ms: u32,
@@ -1023,6 +1553,7 @@ impl Default for SettingsFile {
     fn default() -> Self {
         Self {
             tray_offset: default_tray_offset(),
+            position_version: POSITION_SETTINGS_VERSION,
             taskbar_index: 0,
             poll_interval_ms: default_poll_interval(),
             language: None,
@@ -1070,6 +1601,10 @@ fn load_settings() -> SettingsFile {
         Err(_) => return SettingsFile::default(),
     };
     let mut settings: SettingsFile = serde_json::from_str(&content).unwrap_or_default();
+    if settings.position_version < POSITION_SETTINGS_VERSION {
+        settings.tray_offset = default_tray_offset();
+        settings.position_version = POSITION_SETTINGS_VERSION;
+    }
     if !settings.show_claude_code && !settings.show_codex && !settings.show_antigravity {
         settings.show_codex = true;
     }
@@ -1091,6 +1626,7 @@ fn save_state_settings() {
     if let Some(s) = state.as_ref() {
         save_settings(&SettingsFile {
             tray_offset: s.tray_offset,
+            position_version: POSITION_SETTINGS_VERSION,
             taskbar_index: s.taskbar_index,
             poll_interval_ms: s.poll_interval_ms,
             language: s
@@ -1653,6 +2189,38 @@ fn begin_winget_update(hwnd: HWND) {
     }
 }
 
+fn open_diagnostic_log(hwnd: HWND) {
+    if !diagnose::is_enabled() {
+        if let Err(error) = diagnose::init() {
+            show_error_message(hwnd, "Codex Usage Taskbar", &error);
+            return;
+        }
+        diagnose::log("diagnostic logging enabled from settings menu");
+    }
+
+    let path = diagnose::log_path();
+    let path_string = path.to_string_lossy().to_string();
+    unsafe {
+        let verb = native_interop::wide_str("open");
+        let file = native_interop::wide_str(&path_string);
+        let result = ShellExecuteW(
+            hwnd,
+            PCWSTR::from_raw(verb.as_ptr()),
+            PCWSTR::from_raw(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        if result.0 as isize <= 32 {
+            show_info_message(
+                hwnd,
+                "Codex Usage Taskbar",
+                &format!("Diagnostic log:\n{path_string}"),
+            );
+        }
+    }
+}
+
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_KEY: &str = "CodexUsageTaskbar";
 
@@ -2037,13 +2605,14 @@ pub fn run() {
                 update_status: UpdateStatus::Idle,
                 last_update_check_unix: settings.last_update_check_unix,
                 taskbar_index: settings.taskbar_index,
-                tray_offset: settings.tray_offset,
+                tray_offset: default_tray_offset(),
                 dragging: false,
                 drag_start_mouse_x: 0,
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
                 color_window_hwnd: None,
+                about_window_hwnd: None,
             });
         }
 
@@ -3352,7 +3921,10 @@ unsafe extern "system" fn wnd_proc(
                     });
                 }
                 IDM_COLORS_DIALOG => {
-                    show_color_settings_window(hwnd);
+                    let _ = PostMessageW(hwnd, WM_APP_SHOW_SETTINGS, WPARAM(0), LPARAM(0));
+                }
+                IDM_ABOUT_DIALOG => {
+                    let _ = PostMessageW(hwnd, WM_APP_SHOW_ABOUT, WPARAM(0), LPARAM(0));
                 }
                 IDM_LANG_SYSTEM
                 | IDM_LANG_ENGLISH
@@ -3422,6 +3994,14 @@ unsafe extern "system" fn wnd_proc(
                 }
                 tray_icon::TrayAction::None => {}
             }
+            LRESULT(0)
+        }
+        _ if msg == WM_APP_SHOW_SETTINGS => {
+            show_color_settings_window(hwnd);
+            LRESULT(0)
+        }
+        _ if msg == WM_APP_SHOW_ABOUT => {
+            show_about_window(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -3685,6 +4265,14 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(language_label.as_ptr()),
         );
 
+        let about_label = native_interop::wide_str(label_about(language));
+        let _ = AppendMenuW(
+            settings_menu,
+            MENU_ITEM_FLAGS(0),
+            IDM_ABOUT_DIALOG as usize,
+            PCWSTR::from_raw(about_label.as_ptr()),
+        );
+
         let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
 
         let version_label =
@@ -3739,8 +4327,20 @@ fn show_context_menu(hwnd: HWND) {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            None,
+        )
+        .0 as usize;
         let _ = DestroyMenu(menu);
+        if command != 0 {
+            let _ = PostMessageW(hwnd, WM_COMMAND, WPARAM(command), LPARAM(0));
+        }
     }
 }
 

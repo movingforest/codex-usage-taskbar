@@ -33,6 +33,7 @@ Requirements:
 - Windows 10 or Windows 11
 - Rust toolchain
 - Visual Studio C++ Build Tools
+- Microsoft Edge WebView2 Runtime for the modern settings panel
 - Codex CLI signed in with ChatGPT
 
 Build:
@@ -68,15 +69,18 @@ Settings:
 
 ## UI Settings
 
-Right-click the widget to open the menu.
+Right-click the widget or tray icon to open the menu. Choose `颜色设置` / `Color Settings` to open the modern settings panel. The panel is rendered locally with WebView2 and does not load remote pages.
 
-- `Settings > Language` includes Simplified Chinese.
-- `Settings > Colors` opens a compact color panel with a live preview and swatches for Codex fill, Claude fill, clock base, and text color.
-- `Settings > Screen` lets you choose which taskbar/monitor hosts the widget.
+- `颜色设置` opens by default with a live preview, swatches, custom color pickers, and Apply/Reset/Close actions.
+- `Models` lets you toggle Codex, Claude Code, and Antigravity; Codex stays first.
+- `Display` lets you choose which taskbar/monitor hosts the widget, reset position, or hide/show the widget.
+- `General` includes refresh frequency, startup, language, update check, and exit.
+
+Windows 11 usually includes WebView2. If the settings panel cannot load, install the Evergreen Runtime from Microsoft Edge WebView2 and restart the app. In that failure case the app shows a warning and falls back to the basic system menu so you can still exit or adjust core settings.
 
 ## Taskbar Placement
 
-The primary Windows taskbar is screen 1 and is used by default. The default `tray_offset` is intentionally large, so on startup the app clamps itself to the leftmost available area before the Windows tray icons. Drag the left divider if you want to reposition it, or use `Settings > Screen` to move it to another monitor.
+The primary Windows taskbar is screen 1 and is used by default. On startup the app clamps itself to the leftmost available area before the Windows tray icons. Drag the left divider if you want to reposition it for the current session, or use `Settings > Screen` to move it to another monitor.
 
 ## GitHub Publishing
 
@@ -112,5 +116,6 @@ Changes in this fork:
 - progress bars were replaced with compact clock indicators
 - Simplified Chinese localization, custom colors, and screen selection were added
 - the taskbar widget uses color-coded rings instead of model names, with `5h` reset time and `7d` reset date columns
+- the right-click menu opens a Windows 11-style WebView2 settings panel from `颜色设置` / `Color Settings`
 - local Codex session JSONL fallback is available
 - settings, startup key, diagnostics, and binary metadata use `Codex Usage Taskbar`
