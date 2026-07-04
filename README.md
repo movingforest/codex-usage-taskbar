@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/taskbar-widget-compact.png" alt="Codex Usage Taskbar compact widget" />
+</p>
+
+<p align="center">
+  <img src="assets/taskbar-widget-full.png" alt="Codex Usage Taskbar on Windows taskbar" />
+</p>
+
 # Codex Usage Taskbar
 
 一个本地 Windows 任务栏用量小组件，用于在任务栏左侧显示 Codex 和 Claude Code 的用量状态、剩余比例和重置时间。
