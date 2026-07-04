@@ -24,6 +24,10 @@
 
 This is a local Windows taskbar widget for showing Codex and Claude Code usage limits, remaining percentages, and reset times.
 
+如果这个项目对你有帮助，欢迎点一个 Star，方便后续更新和维护。
+
+If this project helps you, please consider giving it a Star to support future updates and maintenance.
+
 本项目基于 [CodeZeno/Claude-Code-Usage-Monitor](https://github.com/CodeZeno/Claude-Code-Usage-Monitor) 修改，保留上游 MIT License 和 attribution。
 
 ## 功能概览
