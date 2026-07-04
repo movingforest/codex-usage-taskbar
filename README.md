@@ -200,10 +200,6 @@ cargo build --release
 https://github.com/movingforest/codex-usage-taskbar
 
 要求：
-请帮我在 Windows 上安装这个项目：
-https://github.com/movingforest/codex-usage-taskbar
-
-要求：
 1. 检查我是否安装了 Git、Rust、Visual Studio C++ Build Tools 和 Codex CLI。
 2. 如果缺少依赖，帮我安装或告诉我怎么安装。
 3. 克隆这个仓库。
