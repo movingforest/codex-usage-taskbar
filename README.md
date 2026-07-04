@@ -44,6 +44,7 @@ If this project helps you, please consider giving it a Star to support future up
 - **支持拖动调整**任务栏位置，也可以通过菜单重置位置。
 - **刷新屏幕**：支持手动刷新、刷新频率设置、任务栏托盘图标、右键菜单、开机启动和检查更新。
 - **支持多语言**：支持简体中文和英文，默认优先使用系统语言；中文环境下显示中文。
+- 关于页面可直接打开 GitHub 项目地址。
 - 支持诊断日志，日志写入本机临时目录，不上传。
 
 ## UI 显示
@@ -246,6 +247,7 @@ Features:
 - **Draggable position adjustment** and reset position action.
 - **Screen refresh**: manual refresh and configurable refresh frequency.
 - **Multi-language support**: Simplified Chinese and English UI.
+- The About dialog can open the GitHub project page directly.
 - Local diagnostic logs.
 
 The app reads Codex usage from the ChatGPT usage endpoint first, then falls back to local Codex session JSONL rate-limit metadata. Tokens are read from the local Codex CLI auth file only for requests and are not logged.
@@ -273,3 +275,4 @@ Major changes in this fork:
 - Added monitor selection and better default placement on the primary screen.
 - Added local Codex JSONL fallback.
 - Added native color settings and about dialogs.
+- Added a GitHub project link in the About dialog.

@@ -341,6 +341,14 @@ fn label_open_log(language: LanguageId) -> &'static str {
     }
 }
 
+fn label_github_project(language: LanguageId) -> &'static str {
+    if matches!(language, LanguageId::SimplifiedChinese) {
+        "前往 GitHub 项目"
+    } else {
+        "GitHub Project"
+    }
+}
+
 fn color_dialog_size() -> (i32, i32) {
     (sc(720), sc(560))
 }
@@ -568,6 +576,7 @@ struct ColorSettingsLayout {
 
 #[derive(Default)]
 struct AboutLayout {
+    github_button: RECT,
     open_log_button: RECT,
 }
 
@@ -1204,11 +1213,20 @@ fn reset_color_settings(hwnd: HWND) {
 fn about_layout(width: i32, height: i32) -> AboutLayout {
     let right = width - sc(24);
     let button_y = height - sc(58);
+    let gap = sc(12);
+    let open_log_width = sc(128);
+    let github_width = sc(188);
     AboutLayout {
         open_log_button: RECT {
-            left: right - sc(128),
+            left: right - open_log_width,
             top: button_y,
             right,
+            bottom: button_y + sc(38),
+        },
+        github_button: RECT {
+            left: right - open_log_width - gap - github_width,
+            top: button_y,
+            right: right - open_log_width - gap,
             bottom: button_y + sc(38),
         },
     }
@@ -1353,6 +1371,12 @@ fn draw_about(hwnd: HWND, hdc: HDC) {
         let _ = DeleteObject(title_font);
         let _ = DeleteObject(body_font);
 
+        draw_button(
+            hdc,
+            layout.github_button,
+            label_github_project(language),
+            false,
+        );
         draw_button(hdc, layout.open_log_button, label_open_log(language), true);
     }
 }
@@ -1378,7 +1402,9 @@ unsafe extern "system" fn about_wnd_proc(
             let mut client = RECT::default();
             let _ = GetClientRect(hwnd, &mut client);
             let layout = about_layout(client.right - client.left, client.bottom - client.top);
-            if point_in_rect(pt, layout.open_log_button) {
+            if point_in_rect(pt, layout.github_button) {
+                open_github_project(hwnd);
+            } else if point_in_rect(pt, layout.open_log_button) {
                 open_diagnostic_log(hwnd);
             }
             LRESULT(0)
@@ -2216,6 +2242,29 @@ fn open_diagnostic_log(hwnd: HWND) {
                 hwnd,
                 "Codex Usage Taskbar",
                 &format!("Diagnostic log:\n{path_string}"),
+            );
+        }
+    }
+}
+
+fn open_github_project(hwnd: HWND) {
+    const PROJECT_URL: &str = "https://github.com/movingforest/codex-usage-taskbar";
+    unsafe {
+        let verb = native_interop::wide_str("open");
+        let url = native_interop::wide_str(PROJECT_URL);
+        let result = ShellExecuteW(
+            hwnd,
+            PCWSTR::from_raw(verb.as_ptr()),
+            PCWSTR::from_raw(url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        if result.0 as isize <= 32 {
+            show_info_message(
+                hwnd,
+                "Codex Usage Taskbar",
+                &format!("GitHub project:\n{PROJECT_URL}"),
             );
         }
     }
