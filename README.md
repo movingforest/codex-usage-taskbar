@@ -121,7 +121,49 @@ access token 只用于请求用量接口，不写入日志，不提交到仓库�
 
 日志采用追加写入，便于排查重启前后的问题。
 
-## 构建
+## 下载与安装（推荐）
+
+普通用户建议直接下载 Release 里的便携版，不需要安装 Rust 或 Visual Studio C++ Build Tools。
+
+下载地址：
+
+[https://github.com/movingforest/codex-usage-taskbar/releases/latest](https://github.com/movingforest/codex-usage-taskbar/releases/latest)
+
+可选文件：
+
+- `codex-usage-taskbar.exe`：单文件可执行程序，下载后可直接运行。
+- `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip`：便携版压缩包，包含 exe、README、LICENSE 和中文使用说明。
+
+便携版环境要求：
+
+- Windows 10 x64 或 Windows 11 x64。
+- 已安装并登录 Codex CLI，程序会读取本机 Codex 登录信息获取用量。
+- 如果要显示 Claude Code 用量，需要本机已有 Claude Code 对应环境。
+- 需要能访问 ChatGPT / Codex 用量接口。
+- 不需要 Git、Rust、Visual Studio C++ Build Tools。
+- 首次运行可能出现 Windows SmartScreen 提示，因为当前 release 未做代码签名。
+- 极少数精简系统如果提示缺少运行库，可安装 Microsoft Visual C++ Redistributable 后再运行。
+
+运行方式：
+
+1. 下载 `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip`。
+2. 解压到任意目录。
+3. 双击 `codex-usage-taskbar.exe`。
+4. 右键任务栏小组件，可刷新、调整刷新频率、选择模型、设置颜色、选择屏幕、重置位置。
+
+设置文件路径：
+
+```text
+%APPDATA%\CodexUsageTaskbar\settings.json
+```
+
+诊断日志路径：
+
+```text
+%TEMP%\codex-usage-taskbar.log
+```
+
+## 源码构建（开发者）
 
 要求：
 
@@ -149,12 +191,6 @@ cargo build --release
 .\target\release\codex-usage-taskbar.exe --diagnose
 ```
 
-设置文件路径：
-
-```text
-%APPDATA%\CodexUsageTaskbar\settings.json
-```
-
 ## 让 Codex 帮你安装
 
 你可以把下面这段直接复制给 Codex：
@@ -164,13 +200,15 @@ cargo build --release
 https://github.com/movingforest/codex-usage-taskbar
 
 要求：
-1. 检查我是否安装了 Git、Rust、Visual Studio C++ Build Tools 和 Codex CLI。
-2. 如果缺少依赖，帮我安装或告诉我怎么安装。
-3. 克隆这个仓库。
-4. 运行 cargo test 和 cargo build --release。
-5. 启动 target\release\codex-usage-taskbar.exe。
-6. 确认我已经 codex login，否则指导我登录。
-7. 安装成功后，帮我打开 GitHub 项目页面；如果这个项目对我有帮助，请提醒我点一个 Star 支持后续更新。
+1. 优先从 GitHub Releases 下载最新便携版，不要默认从源码构建：
+   https://github.com/movingforest/codex-usage-taskbar/releases/latest
+2. 下载 `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip` 或最新版本的 windows-x64-portable.zip。
+3. 解压到一个固定目录。
+4. 启动 `codex-usage-taskbar.exe`。
+5. 确认我的系统是 Windows 10/11 x64。
+6. 确认我已经安装并登录 Codex CLI；如果没有，请指导我运行 `codex login`。
+7. 如果我要从源码构建，再检查 Git、Rust 和 Visual Studio C++ Build Tools，并运行 `cargo test` 和 `cargo build --release`。
+8. 安装成功后，帮我打开 GitHub 项目页面；如果这个项目对我有帮助，请提醒我点一个 Star 支持后续更新。
 ```
 
 ## 发布到 GitHub 前检查
@@ -213,6 +251,14 @@ Features:
 - Local diagnostic logs.
 
 The app reads Codex usage from the ChatGPT usage endpoint first, then falls back to local Codex session JSONL rate-limit metadata. Tokens are read from the local Codex CLI auth file only for requests and are not logged.
+
+Recommended installation:
+
+- Download the latest portable package from [GitHub Releases](https://github.com/movingforest/codex-usage-taskbar/releases/latest).
+- Run `codex-usage-taskbar.exe` directly after extracting the zip.
+- The portable package does not require Git, Rust, or Visual Studio C++ Build Tools.
+- Runtime requirements are Windows 10/11 x64 and a signed-in Codex CLI.
+- Windows SmartScreen may warn on first launch because the release is not code-signed yet.
 
 ## Upstream Attribution
 
