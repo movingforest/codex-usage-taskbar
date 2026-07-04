@@ -6,6 +6,18 @@
   <img src="assets/taskbar-widget-full.png" alt="Codex Usage Taskbar on Windows taskbar" />
 </p>
 
+<p align="center">
+  <img src="assets/menu-language.png" alt="Codex Usage Taskbar language menu" />
+</p>
+
+<p align="center">
+  <img src="assets/menu-refresh-frequency.png" alt="Codex Usage Taskbar refresh frequency menu" />
+</p>
+
+<p align="center">
+  <img src="assets/menu-screen-selection.png" alt="Codex Usage Taskbar screen selection menu" />
+</p>
+
 # Codex Usage Taskbar
 
 一个本地 Windows 任务栏用量小组件，用于在任务栏左侧显示 Codex 和 Claude Code 的用量状态、剩余比例和重置时间。
@@ -23,11 +35,11 @@ This is a local Windows taskbar widget for showing Codex and Claude Code usage l
 - 显示 `7d` 窗口剩余比例和 7 天窗口日期，格式为 `MM-DD`。
 - 使用紧凑的圆环时钟 UI 表示用量，减少任务栏占用空间。
 - Codex 默认蓝色，Claude Code 默认橙色。
-- 支持自定义 Codex 填充色、Claude 填充色、时钟底色和文字颜色。
-- 支持多屏幕选择，默认放在主屏幕任务栏。
-- 支持拖动调整任务栏位置，也可以通过菜单重置位置。
-- 支持任务栏托盘图标、右键菜单、刷新频率、开机启动和检查更新。
-- 支持简体中文和英文，默认优先使用系统语言；中文环境下显示中文。
+- **支持自定义颜色**：可自定义 Codex 填充色、Claude 填充色、时钟底色和文字颜色。
+- **支持多屏幕选择**，默认放在主屏幕任务栏。
+- **支持拖动调整**任务栏位置，也可以通过菜单重置位置。
+- **刷新屏幕**：支持手动刷新、刷新频率设置、任务栏托盘图标、右键菜单、开机启动和检查更新。
+- **支持多语言**：支持简体中文和英文，默认优先使用系统语言；中文环境下显示中文。
 - 支持诊断日志，日志写入本机临时目录，不上传。
 
 ## UI 显示
@@ -171,10 +183,11 @@ Features:
 - Compact two-line taskbar UI for `5h` and `7d` windows.
 - `5h` reset time and `7d` reset date.
 - Clock-style usage rings with 10-step fill levels.
-- Custom colors for Codex, Claude, clock base, and text.
-- Multi-monitor selection.
-- Draggable taskbar position and reset position action.
-- Simplified Chinese and English UI.
+- **Custom colors** for Codex, Claude, clock base, and text.
+- **Multi-monitor selection**.
+- **Draggable position adjustment** and reset position action.
+- **Screen refresh**: manual refresh and configurable refresh frequency.
+- **Multi-language support**: Simplified Chinese and English UI.
 - Local diagnostic logs.
 
 The app reads Codex usage from the ChatGPT usage endpoint first, then falls back to local Codex session JSONL rate-limit metadata. Tokens are read from the local Codex CLI auth file only for requests and are not logged.
