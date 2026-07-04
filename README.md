@@ -200,15 +200,17 @@ cargo build --release
 https://github.com/movingforest/codex-usage-taskbar
 
 要求：
-1. 优先从 GitHub Releases 下载最新便携版，不要默认从源码构建：
-   https://github.com/movingforest/codex-usage-taskbar/releases/latest
-2. 下载 `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip` 或最新版本的 windows-x64-portable.zip。
-3. 解压到一个固定目录。
-4. 启动 `codex-usage-taskbar.exe`。
-5. 确认我的系统是 Windows 10/11 x64。
-6. 确认我已经安装并登录 Codex CLI；如果没有，请指导我运行 `codex login`。
-7. 如果我要从源码构建，再检查 Git、Rust 和 Visual Studio C++ Build Tools，并运行 `cargo test` 和 `cargo build --release`。
-8. 安装成功后，帮我打开 GitHub 项目页面；如果这个项目对我有帮助，请提醒我点一个 Star 支持后续更新。
+请帮我在 Windows 上安装这个项目：
+https://github.com/movingforest/codex-usage-taskbar
+
+要求：
+1. 检查我是否安装了 Git、Rust、Visual Studio C++ Build Tools 和 Codex CLI。
+2. 如果缺少依赖，帮我安装或告诉我怎么安装。
+3. 克隆这个仓库。
+4. 运行 cargo test 和 cargo build --release。
+5. 启动 target\release\codex-usage-taskbar.exe。
+6. 确认我已经 codex login，否则指导我登录。
+7. 安装成功后，帮我打开 GitHub 项目页面；如果这个项目对我有帮助，请提醒我点一个 Star 支持后续更新。
 ```
 
 ## 发布到 GitHub 前检查
