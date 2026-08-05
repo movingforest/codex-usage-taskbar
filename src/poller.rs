@@ -83,6 +83,12 @@ struct CodexRateLimitDetails {
 struct CodexRateLimitWindow {
     used_percent: f64,
     reset_at: i64,
+    window: Option<String>,
+    #[serde(rename = "bucketId")]
+    bucket_id: Option<String>,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -879,15 +885,83 @@ fn codex_usage_from_response(response: CodexUsageResponse) -> Option<UsageData> 
     let details = *response.rate_limit.flatten()?;
     let mut data = UsageData::default();
 
-    if let Some(window) = details.primary_window.flatten() {
-        data.session = codex_section_from_window(&window);
+    let primary = flatten_codex_window(&details.primary_window);
+    let secondary = flatten_codex_window(&details.secondary_window);
+    let only_one_window = primary.is_some() ^ secondary.is_some();
+
+    if let Some(window) = primary {
+        match classify_codex_window(window, CodexWindowSlot::Primary, only_one_window) {
+            CodexWindowKind::Weekly => data.weekly = codex_section_from_window(window),
+            CodexWindowKind::Session => data.session = codex_section_from_window(window),
+        }
     }
 
-    if let Some(window) = details.secondary_window.flatten() {
-        data.weekly = codex_section_from_window(&window);
+    if let Some(window) = secondary {
+        match classify_codex_window(window, CodexWindowSlot::Secondary, only_one_window) {
+            CodexWindowKind::Weekly => data.weekly = codex_section_from_window(window),
+            CodexWindowKind::Session => data.session = codex_section_from_window(window),
+        }
     }
 
     Some(data)
+}
+
+fn flatten_codex_window(
+    window: &Option<Option<Box<CodexRateLimitWindow>>>,
+) -> Option<&CodexRateLimitWindow> {
+    window.as_ref()?.as_ref().map(Box::as_ref)
+}
+
+#[derive(Clone, Copy)]
+enum CodexWindowSlot {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodexWindowKind {
+    Session,
+    Weekly,
+}
+
+fn classify_codex_window(
+    window: &CodexRateLimitWindow,
+    slot: CodexWindowSlot,
+    only_one_window: bool,
+) -> CodexWindowKind {
+    let label = [
+        window.window.as_deref(),
+        window.bucket_id.as_deref(),
+        window.display_name.as_deref(),
+        window.name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_ascii_lowercase();
+
+    if label.contains("weekly") || label.contains("week") || label.contains("7d") {
+        return CodexWindowKind::Weekly;
+    }
+
+    if label.contains("5h")
+        || label.contains("five_hour")
+        || label.contains("five-hour")
+        || label.contains("five hour")
+        || label.contains("primary")
+    {
+        return CodexWindowKind::Session;
+    }
+
+    if only_one_window {
+        return CodexWindowKind::Weekly;
+    }
+
+    match slot {
+        CodexWindowSlot::Primary => CodexWindowKind::Session,
+        CodexWindowSlot::Secondary => CodexWindowKind::Weekly,
+    }
 }
 
 fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
@@ -1921,6 +1995,47 @@ mod tests {
         assert!(usage.session.resets_at.is_some());
         assert_eq!(usage.weekly.used_percent, 33.0);
         assert_eq!(usage.weekly.remaining_percent, 67.0);
+    }
+
+    #[test]
+    fn codex_usage_response_treats_single_primary_window_as_weekly() {
+        let response: CodexUsageResponse = serde_json::from_str(
+            r#"{
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 68.0,
+                        "reset_at": 1894060800,
+                        "window": "weekly",
+                        "bucketId": "codex-weekly"
+                    }
+                }
+            }"#,
+        )
+        .expect("Codex response should deserialize");
+
+        let usage = codex_usage_from_response(response).expect("usage should parse");
+
+        assert_eq!(usage.session.used_percent, 0.0);
+        assert_eq!(usage.weekly.used_percent, 68.0);
+        assert_eq!(usage.weekly.remaining_percent, 32.0);
+        assert_eq!(usage.weekly.source, UsageSource::Remote);
+    }
+
+    #[test]
+    fn codex_usage_response_treats_unlabelled_single_window_as_weekly() {
+        let response: CodexUsageResponse = serde_json::from_str(
+            r#"{
+                "rate_limit": {
+                    "primary_window": { "used_percent": 68.0, "reset_at": 1894060800 }
+                }
+            }"#,
+        )
+        .expect("Codex response should deserialize");
+
+        let usage = codex_usage_from_response(response).expect("usage should parse");
+
+        assert_eq!(usage.session.used_percent, 0.0);
+        assert_eq!(usage.weekly.remaining_percent, 32.0);
     }
 
     #[test]

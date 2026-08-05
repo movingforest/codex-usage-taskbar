@@ -133,7 +133,7 @@ access token 只用于请求用量接口，不写入日志，不提交到仓库�
 可选文件：
 
 - `codex-usage-taskbar.exe`：单文件可执行程序，下载后可直接运行。
-- `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip`：便携版压缩包，包含 exe、README、LICENSE 和中文使用说明。
+- `codex-usage-taskbar-v0.2.0-windows-x64-portable.zip`：便携版压缩包，包含 exe、README、LICENSE 和中文使用说明。
 
 便携版环境要求：
 
@@ -147,7 +147,7 @@ access token 只用于请求用量接口，不写入日志，不提交到仓库�
 
 运行方式：
 
-1. 下载 `codex-usage-taskbar-v0.1.0-windows-x64-portable.zip`。
+1. 下载 `codex-usage-taskbar-v0.2.0-windows-x64-portable.zip`。
 2. 解压到任意目录。
 3. 双击 `codex-usage-taskbar.exe`。
 4. 右键任务栏小组件，可刷新、调整刷新频率、选择模型、设置颜色、选择屏幕、重置位置。

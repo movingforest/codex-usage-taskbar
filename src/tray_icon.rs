@@ -105,6 +105,14 @@ fn antigravity_fill(percent: f64) -> Color {
 /// For Claude, `percent` = None uses the embedded app icon as the loading state.
 /// For Codex and Antigravity, `percent` = None uses a provider placeholder badge.
 pub fn create_icon(kind: TrayIconKind, percent: Option<f64>) -> HICON {
+    if matches!(kind, TrayIconKind::Codex) {
+        let app_icon = load_embedded_app_icon();
+        if !app_icon.is_invalid() {
+            return app_icon;
+        }
+        return create_codex_logo_icon();
+    }
+
     if matches!(kind, TrayIconKind::Claude) && percent.is_none() {
         let app_icon = load_embedded_app_icon();
         if !app_icon.is_invalid() {
@@ -283,6 +291,111 @@ pub fn create_icon(kind: TrayIconKind, percent: Option<f64>) -> HICON {
             Some(mask_bytes.as_ptr() as *const std::ffi::c_void),
         );
 
+        let icon_info = ICONINFO {
+            fIcon: TRUE,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask_bmp,
+            hbmColor: dib,
+        };
+        let hicon = CreateIconIndirect(&icon_info).unwrap_or_default();
+
+        let _ = DeleteObject(mask_bmp);
+        SelectObject(mem_dc, old_bmp);
+        let _ = DeleteObject(dib);
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND::default(), screen_dc);
+
+        hicon
+    }
+}
+
+fn create_codex_logo_icon() -> HICON {
+    unsafe {
+        let size = 64_i32;
+        let screen_dc = GetDC(HWND::default());
+        let mem_dc = CreateCompatibleDC(screen_dc);
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let dib =
+            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+
+        if dib.is_invalid() || bits.is_null() {
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(HWND::default(), screen_dc);
+            return HICON::default();
+        }
+
+        let old_bmp = SelectObject(mem_dc, dib);
+        let pixel_data = std::slice::from_raw_parts_mut(bits as *mut u32, (size * size) as usize);
+        for px in pixel_data.iter_mut() {
+            *px = 0;
+        }
+
+        let null_pen = GetStockObject(NULL_PEN);
+        let old_pen = SelectObject(mem_dc, null_pen);
+        let bg_brush = CreateSolidBrush(COLORREF(native_interop::colorref(13, 18, 32)));
+        let old_brush = SelectObject(mem_dc, bg_brush);
+        let _ = RoundRect(mem_dc, 3, 3, size - 3, size - 3, 16, 16);
+        SelectObject(mem_dc, old_brush);
+        SelectObject(mem_dc, old_pen);
+        let _ = DeleteObject(bg_brush);
+
+        let blue_pen = CreatePen(PS_SOLID, 6, COLORREF(native_interop::colorref(37, 99, 235)));
+        let cyan_pen = CreatePen(
+            PS_SOLID,
+            4,
+            COLORREF(native_interop::colorref(56, 189, 248)),
+        );
+        let white_pen = CreatePen(
+            PS_SOLID,
+            4,
+            COLORREF(native_interop::colorref(235, 245, 255)),
+        );
+        let null_brush = GetStockObject(NULL_BRUSH);
+        let old_brush = SelectObject(mem_dc, null_brush);
+
+        let old_pen = SelectObject(mem_dc, blue_pen);
+        let _ = Arc(mem_dc, 15, 12, 50, 48, 31, 12, 50, 31);
+        let _ = Arc(mem_dc, 14, 16, 48, 51, 48, 31, 30, 51);
+        SelectObject(mem_dc, cyan_pen);
+        let _ = Arc(mem_dc, 18, 15, 53, 50, 35, 15, 18, 33);
+        SelectObject(mem_dc, white_pen);
+        let _ = Arc(mem_dc, 17, 18, 46, 47, 17, 32, 32, 18);
+
+        SelectObject(mem_dc, old_pen);
+        SelectObject(mem_dc, old_brush);
+        let _ = DeleteObject(blue_pen);
+        let _ = DeleteObject(cyan_pen);
+        let _ = DeleteObject(white_pen);
+
+        for px in pixel_data.iter_mut() {
+            if *px != 0 {
+                *px = (*px & 0x00FF_FFFF) | 0xFF00_0000;
+            }
+        }
+
+        let mask_bytes = vec![0u8; ((size * size + 7) / 8) as usize];
+        let mask_bmp = CreateBitmap(
+            size,
+            size,
+            1,
+            1,
+            Some(mask_bytes.as_ptr() as *const std::ffi::c_void),
+        );
         let icon_info = ICONINFO {
             fIcon: TRUE,
             xHotspot: 0,
