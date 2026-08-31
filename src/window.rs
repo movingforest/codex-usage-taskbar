@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -157,6 +157,10 @@ const TRAY_ICON_UPDATE_REPOSITION_SUPPRESS_MS: u64 = 750;
 const TASKBAR_WATCH_INTERVAL_SECS: u64 = 2;
 
 static SUPPRESS_TRAY_REPOSITION_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Distinguishes an intentional application shutdown from the taskbar shell
+/// destroying our embedded child window during an explorer.exe restart.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
@@ -958,7 +962,7 @@ fn draw_preview_row(
 
 fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
     let widget_w = (rect.right - rect.left - sc(64)).min(sc(560));
-    let widget_h = sc(54);
+    let widget_h = sc(92);
     let x = rect.left + (rect.right - rect.left - widget_w) / 2;
     let y = rect.top + (rect.bottom - rect.top - widget_h) / 2;
     let widget = RECT {
@@ -975,11 +979,11 @@ fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
     );
 
     let (
-        _codex_session_pct,
+        codex_session_pct,
         codex_session_text,
         codex_weekly_pct,
         codex_weekly_text,
-        _claude_session_pct,
+        claude_session_pct,
         claude_session_text,
         claude_weekly_pct,
         claude_weekly_text,
@@ -1008,7 +1012,7 @@ fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
             ),
         }
     };
-    let _reset_5h = reset_time_text(&codex_session_text)
+    let reset_5h = reset_time_text(&codex_session_text)
         .or_else(|| reset_time_text(&claude_session_text))
         .unwrap_or_else(|| "18:40".to_string());
     let reset_7d = reset_time_text(&codex_weekly_text)
@@ -1018,7 +1022,19 @@ fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
     draw_preview_row(
         hdc,
         x + sc(28),
-        y + sc(13),
+        y + sc(16),
+        "5h",
+        &reset_5h,
+        codex_session_pct,
+        &percent_text(&codex_session_text),
+        claude_session_pct,
+        &percent_text(&claude_session_text),
+        &state.colors,
+    );
+    draw_preview_row(
+        hdc,
+        x + sc(28),
+        y + sc(54),
         "7d",
         &reset_7d,
         codex_weekly_pct,
@@ -2416,12 +2432,12 @@ fn set_startup_enabled(enable: bool) {
 }
 
 // Ultra-compact taskbar UI dimensions.
-const CLOCK_SIZE: i32 = 18;
-const LARGE_CLOCK_SIZE: i32 = 24;
+const CLOCK_SIZE: i32 = 13;
+const LARGE_CLOCK_SIZE: i32 = 18;
 const CLOCK_TEXT_GAP: i32 = 4;
 const LEFT_DIVIDER_W: i32 = 3;
 const DIVIDER_RIGHT_MARGIN: i32 = 8;
-const LABEL_WIDTH: i32 = 20;
+const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 5;
 const RESET_WIDTH: i32 = 40;
 const MODEL_PERCENT_WIDTH: i32 = 36;
@@ -2985,16 +3001,16 @@ fn paint_content(
     accent: &Color,
     track: &Color,
     strings: Strings,
-    _session_pct: f64,
-    _session_text: &str,
+    session_pct: f64,
+    session_text: &str,
     weekly_pct: f64,
     weekly_text: &str,
-    _codex_session_pct: f64,
-    _codex_session_text: &str,
+    codex_session_pct: f64,
+    codex_session_text: &str,
     codex_weekly_pct: f64,
     codex_weekly_text: &str,
-    _antigravity_session_pct: f64,
-    _antigravity_session_text: &str,
+    antigravity_session_pct: f64,
+    antigravity_session_text: &str,
     antigravity_weekly_pct: f64,
     antigravity_weekly_text: &str,
     show_claude_code: bool,
@@ -3053,20 +3069,15 @@ fn paint_content(
         let _ = DeleteObject(right_brush);
 
         let content_x = sc(LEFT_DIVIDER_W) + sc(DIVIDER_RIGHT_MARGIN);
-        let active_models = active_model_count(show_claude_code, show_codex, show_antigravity);
-        let clock_size = sc(if active_models <= 1 {
-            LARGE_CLOCK_SIZE
-        } else {
-            CLOCK_SIZE
-        });
-        let row_y = (height - clock_size) / 2;
+        let row2_y = height - sc(5) - sc(CLOCK_SIZE);
+        let row1_y = row2_y - sc(10) - sc(CLOCK_SIZE);
 
         let _ = SetBkMode(hdc, TRANSPARENT);
         let _ = SetTextColor(hdc, COLORREF(text_color.to_colorref()));
 
         let font_name = native_interop::wide_str("Segoe UI");
         let font = CreateFontW(
-            sc(if active_models <= 1 { -14 } else { -13 }),
+            sc(-12),
             0,
             0,
             0,
@@ -3086,7 +3097,28 @@ fn paint_content(
         draw_row(
             hdc,
             content_x,
-            row_y,
+            row1_y,
+            is_dark,
+            text_color,
+            strings.session_window,
+            session_pct,
+            session_text,
+            codex_session_pct,
+            codex_session_text,
+            antigravity_session_pct,
+            antigravity_session_text,
+            show_claude_code,
+            show_codex,
+            show_antigravity,
+            accent,
+            codex_accent,
+            antigravity_accent,
+            track,
+        );
+        draw_row(
+            hdc,
+            content_x,
+            row2_y,
             is_dark,
             text_color,
             strings.weekly_window,
@@ -3930,6 +3962,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 2 => {
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -4097,6 +4130,18 @@ unsafe extern "system" fn wnd_proc(
             reattach_selected_taskbar(hwnd);
             LRESULT(0)
         }
+        WM_QUERYENDSESSION => {
+            // Do not relaunch while Windows is signing out or shutting down.
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+            LRESULT(1)
+        }
+        WM_CLOSE => {
+            // WM_CLOSE is used by the Exit/update paths and by a normal user
+            // close. Mark it intentional before DefWindowProc destroys us.
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             let hook = {
                 let state = lock_state();
@@ -4106,7 +4151,23 @@ unsafe extern "system" fn wnd_proc(
                 native_interop::unhook_win_event(h);
             }
             tray_icon::remove_all(hwnd);
-            PostQuitMessage(0);
+
+            if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                diagnose::log("main window destroyed after an intentional shutdown");
+                PostQuitMessage(0);
+            } else {
+                // explorer.exe destroys every child embedded in the taskbar.
+                // Relaunch synchronously here; otherwise WM_DESTROY ends the
+                // message loop before the background watchdog gets a chance to
+                // recover the widget.
+                diagnose::log(
+                    "main window destroyed unexpectedly; relaunching after taskbar restart",
+                );
+                relaunch_self();
+                // Reaching this line means spawning the replacement failed.
+                // End the now-windowless process instead of leaving it hung.
+                PostQuitMessage(1);
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

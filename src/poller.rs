@@ -18,6 +18,7 @@ use crate::models::{AppUsageData, UsageData, UsageSection, UsageSource};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_LOCAL_USAGE_FRESH_SECS: u64 = 5 * 60;
 const ANTIGRAVITY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
@@ -83,6 +84,7 @@ struct CodexRateLimitDetails {
 struct CodexRateLimitWindow {
     used_percent: f64,
     reset_at: i64,
+    window_minutes: Option<f64>,
     window: Option<String>,
     #[serde(rename = "bucketId")]
     bucket_id: Option<String>,
@@ -264,6 +266,21 @@ fn poll_claude_code() -> Result<UsageData, PollError> {
 }
 
 fn poll_codex() -> Result<UsageData, PollError> {
+    // Codex writes the current rate limit into the active session before this
+    // helper can reliably reach the ChatGPT endpoint on every network. Prefer
+    // that just-written record so a weekly reset is reflected immediately
+    // instead of leaving the previous percentage on screen while the remote
+    // request waits for its timeout.
+    if let Some(candidate) = read_latest_codex_session_candidate() {
+        if codex_session_candidate_is_fresh(&candidate, SystemTime::now()) {
+            diagnose::log(format!(
+                "using fresh local Codex usage: weekly remaining {:.0}%",
+                candidate.usage.weekly.remaining_percent
+            ));
+            return Ok(candidate.usage);
+        }
+    }
+
     let remote_result = match read_codex_credentials() {
         Some(creds) => match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
             Ok(data) => Ok(data),
@@ -941,6 +958,15 @@ fn classify_codex_window(
     .join(" ")
     .to_ascii_lowercase();
 
+    classify_codex_window_metadata(&label, window.window_minutes, slot, only_one_window)
+}
+
+fn classify_codex_window_metadata(
+    label: &str,
+    window_minutes: Option<f64>,
+    slot: CodexWindowSlot,
+    only_one_window: bool,
+) -> CodexWindowKind {
     if label.contains("weekly") || label.contains("week") || label.contains("7d") {
         return CodexWindowKind::Weekly;
     }
@@ -952,6 +978,19 @@ fn classify_codex_window(
         || label.contains("primary")
     {
         return CodexWindowKind::Session;
+    }
+
+    // Current Codex responses can expose the weekly allowance as the only
+    // `primary` window. The duration is the most reliable discriminator in
+    // that shape: 10,080 minutes is seven days, while 300 minutes is five
+    // hours.
+    if let Some(window_minutes) = window_minutes {
+        if window_minutes >= 7.0 * 24.0 * 60.0 {
+            return CodexWindowKind::Weekly;
+        }
+        if window_minutes <= 5.0 * 60.0 {
+            return CodexWindowKind::Session;
+        }
     }
 
     if only_one_window {
@@ -978,8 +1017,12 @@ struct CodexSessionCandidate {
 }
 
 fn read_latest_codex_session_usage() -> Option<UsageData> {
+    Some(read_latest_codex_session_candidate()?.usage)
+}
+
+fn read_latest_codex_session_candidate() -> Option<CodexSessionCandidate> {
     let sessions_path = codex_sessions_path()?;
-    read_latest_codex_session_usage_from_root(&sessions_path)
+    read_latest_codex_session_candidate_from_root(&sessions_path)
 }
 
 fn codex_sessions_path() -> Option<PathBuf> {
@@ -990,20 +1033,41 @@ fn codex_sessions_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("sessions"))
 }
 
+#[cfg(test)]
 fn read_latest_codex_session_usage_from_root(root: &Path) -> Option<UsageData> {
+    Some(read_latest_codex_session_candidate_from_root(root)?.usage)
+}
+
+fn read_latest_codex_session_candidate_from_root(root: &Path) -> Option<CodexSessionCandidate> {
     let mut files = Vec::new();
     collect_jsonl_files(root, &mut files);
 
+    // Session files are append-only. The file written most recently contains
+    // the newest rate-limit event in normal operation, so checking files in
+    // modification order avoids reparsing every historical (potentially very
+    // large) Codex transcript on every one-minute widget refresh.
+    files.sort_by_key(|path| {
+        std::cmp::Reverse(
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH),
+        )
+    });
+
     files
         .into_iter()
-        .filter_map(|file| parse_codex_session_file(&file))
-        .max_by_key(|candidate| {
-            candidate
-                .timestamp
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-        })
-        .map(|candidate| candidate.usage)
+        .find_map(|file| parse_codex_session_file(&file))
+}
+
+fn codex_session_candidate_is_fresh(candidate: &CodexSessionCandidate, now: SystemTime) -> bool {
+    let age = now.duration_since(candidate.timestamp).unwrap_or_default();
+    let weekly_window_is_current = candidate
+        .usage
+        .weekly
+        .resets_at
+        .is_some_and(|reset| reset > now);
+
+    age <= Duration::from_secs(CODEX_LOCAL_USAGE_FRESH_SECS) && weekly_window_is_current
 }
 
 fn collect_jsonl_files(path: &Path, out: &mut Vec<PathBuf>) {
@@ -1080,23 +1144,54 @@ fn codex_usage_from_session_rate_limits(
     let mut data = UsageData::default();
     let mut found = false;
 
-    if let Some(section) = rate_limits
-        .get("primary")
-        .and_then(|limit| codex_section_from_session_limit(limit, record_timestamp))
-    {
-        data.session = section;
-        found = true;
+    let primary = rate_limits.get("primary").filter(|limit| !limit.is_null());
+    let secondary = rate_limits
+        .get("secondary")
+        .filter(|limit| !limit.is_null());
+    let only_one_window = primary.is_some() ^ secondary.is_some();
+
+    if let Some(limit) = primary {
+        if let Some(section) = codex_section_from_session_limit(limit, record_timestamp) {
+            match classify_codex_session_window(limit, CodexWindowSlot::Primary, only_one_window) {
+                CodexWindowKind::Weekly => data.weekly = section,
+                CodexWindowKind::Session => data.session = section,
+            }
+            found = true;
+        }
     }
 
-    if let Some(section) = rate_limits
-        .get("secondary")
-        .and_then(|limit| codex_section_from_session_limit(limit, record_timestamp))
-    {
-        data.weekly = section;
-        found = true;
+    if let Some(limit) = secondary {
+        if let Some(section) = codex_section_from_session_limit(limit, record_timestamp) {
+            match classify_codex_session_window(limit, CodexWindowSlot::Secondary, only_one_window)
+            {
+                CodexWindowKind::Weekly => data.weekly = section,
+                CodexWindowKind::Session => data.session = section,
+            }
+            found = true;
+        }
     }
 
     found.then_some(data)
+}
+
+fn classify_codex_session_window(
+    limit: &serde_json::Value,
+    slot: CodexWindowSlot,
+    only_one_window: bool,
+) -> CodexWindowKind {
+    let label = ["window", "bucketId", "displayName", "name"]
+        .into_iter()
+        .filter_map(|key| limit.get(key).and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+
+    classify_codex_window_metadata(
+        &label,
+        json_number(limit, "window_minutes"),
+        slot,
+        only_one_window,
+    )
 }
 
 fn codex_section_from_session_limit(
@@ -2067,12 +2162,85 @@ mod tests {
     }
 
     #[test]
+    fn local_codex_session_treats_single_seven_day_primary_as_weekly() {
+        let rate_limits: serde_json::Value = serde_json::from_str(
+            r#"{
+                "primary": {
+                    "used_percent": 18.0,
+                    "resets_at": 1894060800,
+                    "window_minutes": 10080
+                },
+                "secondary": null
+            }"#,
+        )
+        .expect("rate limits should deserialize");
+
+        let usage = codex_usage_from_session_rate_limits(&rate_limits, SystemTime::now())
+            .expect("local usage should parse");
+
+        assert_eq!(usage.session.source, UsageSource::Unknown);
+        assert_eq!(usage.weekly.used_percent, 18.0);
+        assert_eq!(usage.weekly.remaining_percent, 82.0);
+        assert_eq!(usage.weekly.source, UsageSource::LocalSession);
+        assert!(usage.weekly.resets_at.is_some());
+    }
+
+    #[test]
+    fn fresh_local_codex_session_can_bypass_slow_remote_poll() {
+        let now = SystemTime::now();
+        let candidate = CodexSessionCandidate {
+            timestamp: now - Duration::from_secs(30),
+            usage: UsageData {
+                session: UsageSection::default(),
+                weekly: UsageSection::from_used_percent(
+                    0.0,
+                    Some(now + Duration::from_secs(7 * 24 * 60 * 60)),
+                    UsageSource::LocalSession,
+                ),
+            },
+        };
+
+        assert!(codex_session_candidate_is_fresh(&candidate, now));
+        assert_eq!(candidate.usage.weekly.remaining_percent, 100.0);
+    }
+
+    #[test]
+    fn expired_or_old_local_codex_session_does_not_bypass_remote_poll() {
+        let now = SystemTime::now();
+        let old_candidate = CodexSessionCandidate {
+            timestamp: now - Duration::from_secs(CODEX_LOCAL_USAGE_FRESH_SECS + 1),
+            usage: UsageData {
+                session: UsageSection::default(),
+                weekly: UsageSection::from_used_percent(
+                    33.0,
+                    Some(now + Duration::from_secs(60)),
+                    UsageSource::LocalSession,
+                ),
+            },
+        };
+        let expired_candidate = CodexSessionCandidate {
+            timestamp: now,
+            usage: UsageData {
+                session: UsageSection::default(),
+                weekly: UsageSection::from_used_percent(
+                    33.0,
+                    Some(now - Duration::from_secs(1)),
+                    UsageSource::LocalSession,
+                ),
+            },
+        };
+
+        assert!(!codex_session_candidate_is_fresh(&old_candidate, now));
+        assert!(!codex_session_candidate_is_fresh(&expired_candidate, now));
+    }
+
+    #[test]
     fn local_codex_session_marks_past_reset_as_stale() {
         let root = unique_test_dir("stale");
         fs::create_dir_all(&root).expect("test dir should be created");
         fs::write(
             root.join("rollout.jsonl"),
-            r#"{"type":"event_msg","timestamp":"2026-07-03T02:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":100.0,"resets_at":1}}}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-03T02:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":100.0,"resets_at":1,"window_minutes":300}}}}"#,
         )
         .expect("test jsonl should be written");
 
