@@ -273,11 +273,12 @@ fn poll_codex() -> Result<UsageData, PollError> {
     // request waits for its timeout.
     if let Some(candidate) = read_latest_codex_session_candidate() {
         if codex_session_candidate_is_fresh(&candidate, SystemTime::now()) {
+            let data = prepare_codex_usage_for_display(candidate.usage);
             diagnose::log(format!(
-                "using fresh local Codex usage: weekly remaining {:.0}%",
-                candidate.usage.weekly.remaining_percent
+                "using fresh local Codex usage: session remaining {:.0}%, weekly remaining {:.0}%",
+                data.session.remaining_percent, data.weekly.remaining_percent
             ));
-            return Ok(candidate.usage);
+            return Ok(data);
         }
     }
 
@@ -298,17 +299,34 @@ fn poll_codex() -> Result<UsageData, PollError> {
     };
 
     match remote_result {
-        Ok(data) => Ok(data),
+        Ok(data) => Ok(prepare_codex_usage_for_display(data)),
         Err(error) => match read_latest_codex_session_usage() {
             Some(data) => {
+                let data = prepare_codex_usage_for_display(data);
                 diagnose::log(format!(
-                    "Codex usage remote poll failed with {error:?}; using local session fallback"
+                    "Codex usage remote poll failed with {error:?}; using local session fallback: session remaining {:.0}%, weekly remaining {:.0}%",
+                    data.session.remaining_percent, data.weekly.remaining_percent
                 ));
                 Ok(data)
             }
             None => Err(error),
         },
     }
+}
+
+/// Once a recorded reset time has passed, the previous window percentage is
+/// no longer valid. Display the newly reset allowance as full while retaining
+/// the stale reset timestamp so the window layer keeps polling every five
+/// seconds until Codex writes or returns the replacement window.
+fn prepare_codex_usage_for_display(mut data: UsageData) -> UsageData {
+    for section in [&mut data.session, &mut data.weekly] {
+        if section.stale {
+            section.percentage = 0.0;
+            section.used_percent = 0.0;
+            section.remaining_percent = 100.0;
+        }
+    }
+    data
 }
 
 fn poll_antigravity() -> Result<UsageData, PollError> {
@@ -1922,7 +1940,7 @@ pub fn format_line(section: &UsageSection, strings: Strings) -> String {
 
 pub fn format_remaining_line(section: &UsageSection, show_reset_time: bool) -> String {
     let pct = format!("{:.0}%", section.remaining_percent);
-    if show_reset_time {
+    if show_reset_time && !section.stale {
         format_reset_clock_time(section.resets_at)
             .map(|reset| format!("{pct} \u{00b7} {reset}"))
             .unwrap_or(pct)
@@ -1933,6 +1951,9 @@ pub fn format_remaining_line(section: &UsageSection, show_reset_time: bool) -> S
 
 pub fn format_remaining_line_with_reset_date(section: &UsageSection) -> String {
     let pct = format!("{:.0}%", section.remaining_percent);
+    if section.stale {
+        return pct;
+    }
     format_reset_date(section.resets_at)
         .map(|reset| format!("{pct} \u{00b7} {reset}"))
         .unwrap_or(pct)
@@ -1944,7 +1965,9 @@ pub fn format_detail_line(section: &UsageSection) -> String {
         section.remaining_percent, section.used_percent
     )];
 
-    if let Some(reset) = format_reset_time(section.resets_at) {
+    if section.stale {
+        parts.push("reset detected; awaiting fresh usage".to_string());
+    } else if let Some(reset) = format_reset_time(section.resets_at) {
         parts.push(format!("resets {reset}"));
     }
 
@@ -2251,6 +2274,58 @@ mod tests {
         assert_eq!(format_remaining_line(&usage.session, false), "0%");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expired_codex_window_displays_as_reset_while_fast_polling_continues() {
+        let expired_reset = SystemTime::now() - Duration::from_secs(30);
+        let future_reset = SystemTime::now() + Duration::from_secs(7 * 24 * 60 * 60);
+        let data = UsageData {
+            session: UsageSection::from_used_percent(
+                55.0,
+                Some(expired_reset),
+                UsageSource::LocalSession,
+            ),
+            weekly: UsageSection::from_used_percent(
+                21.0,
+                Some(future_reset),
+                UsageSource::LocalSession,
+            ),
+        };
+
+        let prepared = prepare_codex_usage_for_display(data);
+
+        assert!(prepared.session.stale);
+        assert_eq!(prepared.session.used_percent, 0.0);
+        assert_eq!(prepared.session.remaining_percent, 100.0);
+        assert_eq!(prepared.session.resets_at, Some(expired_reset));
+        assert_eq!(format_remaining_line(&prepared.session, true), "100%");
+        assert_eq!(prepared.weekly.remaining_percent, 79.0);
+        assert!(!prepared.weekly.stale);
+        assert!(is_past_reset(&prepared));
+    }
+
+    #[test]
+    fn fresh_codex_window_percentage_is_unchanged() {
+        let data = UsageData {
+            session: UsageSection::from_used_percent(
+                11.0,
+                Some(SystemTime::now() + Duration::from_secs(4 * 60 * 60)),
+                UsageSource::LocalSession,
+            ),
+            weekly: UsageSection::from_used_percent(
+                21.0,
+                Some(SystemTime::now() + Duration::from_secs(6 * 24 * 60 * 60)),
+                UsageSource::LocalSession,
+            ),
+        };
+
+        let prepared = prepare_codex_usage_for_display(data);
+
+        assert_eq!(prepared.session.remaining_percent, 89.0);
+        assert_eq!(prepared.weekly.remaining_percent, 79.0);
+        assert!(!prepared.session.stale);
+        assert!(!prepared.weekly.stale);
     }
 
     #[test]
