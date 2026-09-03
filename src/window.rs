@@ -246,12 +246,12 @@ fn relaunch_self() {
     }
 }
 
-/// Detect explorer.exe restarts and recover from them.
+/// Detect explorer.exe restarts and taskbar topology changes.
 ///
 /// Once explorer destroys the taskbar, our embedded child window is destroyed
 /// and the UI message loop is dead, so recovery cannot happen in-process. This
-/// dedicated thread (independent of the dead message loop) polls the taskbar
-/// handle and, when it changes, relaunches the widget as a fresh process.
+/// dedicated thread (independent of the dead message loop) also detects when a
+/// saved taskbar becomes available after startup and reattaches the widget.
 fn spawn_taskbar_watchdog() {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(TASKBAR_WATCH_INTERVAL_SECS));
@@ -267,11 +267,14 @@ fn spawn_taskbar_watchdog() {
             continue;
         };
         let taskbars = native_interop::find_taskbars();
-        if !taskbars.is_empty() && !taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
+        if !taskbars.is_empty() {
             let desired_index = selected_index.min(taskbars.len().saturating_sub(1));
             let desired = taskbars[desired_index].hwnd;
+            if desired == old {
+                continue;
+            }
             diagnose::log(format!(
-                "watchdog: taskbar changed old={:?} selected_index={} desired={:?} -> reattaching",
+                "watchdog: selected taskbar changed old={:?} selected_index={} desired={:?} -> reattaching",
                 old.0, selected_index, desired.0
             ));
             let posted = unsafe {
@@ -1855,7 +1858,10 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         s.taskbar_hwnd = Some(taskbar.hwnd);
         s.tray_notify_hwnd = tray_notify;
         s.win_event_hook = hook;
-        s.taskbar_index = index;
+        // Keep the user's logical selection even if not every taskbar is ready
+        // yet during sign-in. The watchdog will move the widget when the
+        // selected taskbar appears.
+        s.taskbar_index = requested_index;
         s.embedded = true;
     }
     true
@@ -2320,6 +2326,19 @@ fn open_github_project(hwnd: HWND) {
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_KEY: &str = "CodexUsageTaskbar";
 
+fn startup_value_matches_executable(reg_value: &str, current_exe: &str) -> bool {
+    let trimmed = reg_value.trim();
+    let registered_exe = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    registered_exe.eq_ignore_ascii_case(current_exe)
+}
+
+fn quoted_startup_command(exe: &str) -> String {
+    format!("\"{exe}\"")
+}
+
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
     unsafe {
@@ -2383,8 +2402,8 @@ fn is_startup_enabled() -> bool {
         }
         let current_exe = String::from_utf16_lossy(&exe_buf[..len]);
 
-        // Case-insensitive comparison (Windows paths are case-insensitive)
-        reg_value.eq_ignore_ascii_case(&current_exe)
+        // Accept both legacy unquoted entries and the safely quoted command.
+        startup_value_matches_executable(&reg_value, &current_exe)
     }
 }
 
@@ -2410,15 +2429,16 @@ fn set_startup_enabled(enable: bool) {
             let mut exe_buf = [0u16; 260];
             let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
             if len > 0 {
-                // Write the wide string including null terminator
-                let byte_len = ((len + 1) * 2) as u32;
+                let exe = String::from_utf16_lossy(&exe_buf[..len]);
+                let command = native_interop::wide_str(&quoted_startup_command(&exe));
+                let byte_len = (command.len() * 2) as u32;
                 let _ = RegSetValueExW(
                     hkey,
                     PCWSTR::from_raw(key_name.as_ptr()),
                     0,
                     REG_SZ,
                     Some(std::slice::from_raw_parts(
-                        exe_buf.as_ptr() as *const u8,
+                        command.as_ptr() as *const u8,
                         byte_len as usize,
                     )),
                 );
@@ -4862,5 +4882,25 @@ fn draw_clock(
         let _ = DeleteObject(pen);
         let _ = DeleteObject(track_brush);
         let _ = DeleteObject(fill_brush);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{quoted_startup_command, startup_value_matches_executable};
+
+    #[test]
+    fn startup_registry_match_accepts_quoted_paths_with_spaces() {
+        let exe = r"E:\User Files\codex-usage-taskbar.exe";
+        assert!(startup_value_matches_executable(
+            &quoted_startup_command(exe),
+            exe
+        ));
+    }
+
+    #[test]
+    fn startup_registry_match_remains_compatible_with_legacy_value() {
+        let exe = r"E:\User Files\codex-usage-taskbar.exe";
+        assert!(startup_value_matches_executable(exe, exe));
     }
 }
