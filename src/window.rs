@@ -2478,10 +2478,12 @@ const MODEL_RIGHT_MARGIN: i32 = 5;
 const RIGHT_MARGIN: i32 = 4;
 const WIDGET_HEIGHT: i32 = 46;
 const TIMER_CODEX_LOCAL: usize = 5;
+const TIMER_CODEX_REMOTE: usize = 6;
 const CODEX_LOCAL_CHECK_MS: u32 = 5_000;
 static POLL_MUTEX: Mutex<()> = Mutex::new(());
 static MANUAL_POLL_PENDING: AtomicBool = AtomicBool::new(false);
 static LOCAL_POLL_MUTEX: Mutex<()> = Mutex::new(());
+static REMOTE_POLL_MUTEX: Mutex<()> = Mutex::new(());
 
 fn weekly_only_layout(
     plan: CodexPlan,
@@ -2813,6 +2815,7 @@ pub fn run() {
         };
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
         SetTimer(hwnd, TIMER_CODEX_LOCAL, CODEX_LOCAL_CHECK_MS, None);
+        SetTimer(hwnd, TIMER_CODEX_REMOTE, CODEX_LOCAL_CHECK_MS, None);
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
@@ -2825,7 +2828,7 @@ pub fn run() {
         let send_hwnd = SendHwnd::from_hwnd(hwnd);
         std::thread::spawn(move || {
             diagnose::log("initial poll thread started");
-            do_poll(send_hwnd, false);
+            do_poll(send_hwnd, true);
         });
 
         schedule_auto_update_check(hwnd);
@@ -3275,6 +3278,43 @@ fn refresh_local_codex(send_hwnd: SendHwnd) {
                 LPARAM(0),
             );
         }
+    }
+}
+
+fn refresh_remote_codex(send_hwnd: SendHwnd) {
+    let Ok(_guard) = REMOTE_POLL_MUTEX.try_lock() else {
+        return;
+    };
+    if !lock_state().as_ref().is_some_and(|state| state.show_codex) {
+        return;
+    }
+    let Ok(codex) = poller::poll_codex(true) else {
+        return;
+    };
+    let mut state = lock_state();
+    let Some(s) = state.as_mut() else {
+        return;
+    };
+    let current = s.data.as_ref().and_then(|data| data.codex.as_ref());
+    if current.is_some_and(|current| !usage_is_newer(&codex, current)) {
+        return;
+    }
+    s.codex_session_percent = codex.session.percentage;
+    s.codex_weekly_percent = codex.weekly.percentage;
+    if codex.codex_plan != CodexPlan::Unknown {
+        s.codex_plan = codex.codex_plan;
+    }
+    s.data.get_or_insert_with(AppUsageData::default).codex = Some(codex);
+    s.last_poll_ok = true;
+    refresh_usage_texts(s);
+    drop(state);
+    unsafe {
+        let _ = PostMessageW(
+            send_hwnd.to_hwnd(),
+            WM_APP_USAGE_UPDATED,
+            WPARAM(0),
+            LPARAM(0),
+        );
     }
 }
 
@@ -3856,6 +3896,10 @@ unsafe extern "system" fn wnd_proc(
                 TIMER_CODEX_LOCAL => {
                     let sh = SendHwnd::from_hwnd(hwnd);
                     std::thread::spawn(move || refresh_local_codex(sh));
+                }
+                TIMER_CODEX_REMOTE => {
+                    let sh = SendHwnd::from_hwnd(hwnd);
+                    std::thread::spawn(move || refresh_remote_codex(sh));
                 }
                 _ => {}
             }

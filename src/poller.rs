@@ -313,7 +313,7 @@ pub fn latest_local_codex_usage() -> Option<UsageData> {
     Some(data)
 }
 
-fn poll_codex(force_remote: bool) -> Result<UsageData, PollError> {
+pub fn poll_codex(force_remote: bool) -> Result<UsageData, PollError> {
     // Codex writes the current rate limit into the active session before this
     // helper can reliably reach the ChatGPT endpoint on every network. Prefer
     // that just-written record so a weekly reset is reflected immediately
@@ -871,7 +871,15 @@ fn parse_rate_limit_headers(response: &ureq::Response) -> UsageData {
 
 fn fetch_codex_usage(token: &str, account_id: Option<&str>) -> Result<UsageData, PollError> {
     let observed_at = SystemTime::now();
-    let agent = build_agent()?;
+    let tls = native_tls::TlsConnector::new().map_err(|_| PollError::RequestFailed)?;
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .tls_connector(std::sync::Arc::new(tls));
+    if let Some(proxy) = crate::system_proxy::for_url(CODEX_USAGE_URL) {
+        builder = builder.proxy(ureq::Proxy::new(proxy).map_err(|_| PollError::RequestFailed)?);
+        diagnose::log("Codex usage request using Windows system proxy/PAC");
+    }
+    let agent = builder.build();
     let mut request = agent
         .get(CODEX_USAGE_URL)
         .set("Authorization", &format!("Bearer {token}"))
@@ -1077,16 +1085,9 @@ fn read_latest_codex_session_candidate_from_root(root: &Path) -> Option<CodexSes
     files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
 
     let mut latest: Option<CodexSessionCandidate> = None;
-    for (path, modified) in files {
-        // Older files cannot contain an event newer than their last write.
-        // A recently resumed conversation can still contain old usage, so
-        // compare event timestamps instead of taking the first file's result.
-        if latest
-            .as_ref()
-            .is_some_and(|candidate| candidate.timestamp > modified)
-        {
-            break;
-        }
+    for (path, _) in files {
+        // Codex may preserve a rollout's original file modification time.
+        // Inspect every file's cached event; mtime is not an event-time bound.
         if let Some(candidate) = parse_codex_session_file(&path) {
             if latest
                 .as_ref()
@@ -2173,6 +2174,41 @@ mod tests {
         let usage = read_latest_codex_session_usage_from_root(&root).unwrap();
         assert_eq!(usage.session.remaining_percent, 93.0);
         assert_eq!(usage.codex_plan, CodexPlan::Plus);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preserved_file_write_time_cannot_hide_a_newer_event() {
+        let root = unique_test_dir("preserved-file-time");
+        fs::create_dir_all(&root).unwrap();
+        let newest_file = root.join("recent-file.jsonl");
+        let preserved_file = root.join("preserved-file.jsonl");
+        fs::write(
+            &newest_file,
+            rate_event("2026-10-01T17:13:40Z", 31.0, "plus", "codex"),
+        )
+        .unwrap();
+        fs::write(
+            &preserved_file,
+            rate_event("2026-10-01T17:18:00Z", 37.0, "plus", "codex"),
+        )
+        .unwrap();
+        let recent = chrono::DateTime::parse_from_rfc3339("2026-10-01T17:19:00Z").unwrap();
+        let preserved = chrono::DateTime::parse_from_rfc3339("2026-10-01T17:12:00Z").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&newest_file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(SystemTime::from(recent)))
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&preserved_file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(SystemTime::from(preserved)))
+            .unwrap();
+        let usage = read_latest_codex_session_usage_from_root(&root).unwrap();
+        assert_eq!(usage.session.remaining_percent, 63.0);
         fs::remove_dir_all(root).unwrap();
     }
 

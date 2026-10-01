@@ -44,7 +44,7 @@ If this project helps you, please consider giving it a Star to support future up
 - **支持多屏幕选择**，默认放在主屏幕任务栏。
 - **支持拖动调整**任务栏位置，也可以通过菜单重置位置。
 - **刷新屏幕**：支持手动刷新、刷新频率设置、任务栏托盘图标、右键菜单、开机启动和检查更新。
-- 每 5 秒增量检查本地 Codex 用量事件；手动刷新和定期轮询会请求远程额度，慢请求不会覆盖更新的本地结果。
+- 每 5 秒检查本地 Codex 用量事件并独立请求服务器额度，支持 Windows 系统代理/PAC；慢请求不会覆盖更新的结果。
 - **支持多语言**：支持简体中文和英文，默认优先使用系统语言；中文环境下显示中文。
 - 关于页面可直接打开 GitHub 项目地址。
 - 支持诊断日志，日志写入本机临时目录，不上传。
@@ -100,8 +100,8 @@ Plus 的任务栏主界面使用两行紧凑布局：
 Codex 用量更新方式：
 
 1. 每 5 秒增量读取 `%USERPROFILE%\.codex\sessions`（或 `%CODEX_HOME%\sessions`）中新的 `token_count.rate_limits`，比较事件时间而非只比较会话文件修改时间。
-2. 按菜单设置的刷新频率请求 ChatGPT Codex usage endpoint：`https://chatgpt.com/backend-api/wham/usage`；手动刷新也会重新请求，不受本地 5 分钟新鲜度判断限制。
-3. 远程请求失败时保留本地额度作为回退；正在进行的远程请求不会阻塞本地新事件更新。服务器或 Codex 尚未产出新用量事件时，客户端无法提前计算真实额度。
+2. 启动时及每 5 秒独立请求 ChatGPT Codex usage endpoint：`https://chatgpt.com/backend-api/wham/usage`；手动刷新也会重新请求，不受本地 5 分钟新鲜度判断限制。同一实时远程通道不会重叠请求。
+3. 远程请求遵循 Windows 当前用户的系统代理/PAC 配置，不修改系统代理设置。远程失败时保留本地额度作为回退；正在进行的远程请求不会阻塞本地新事件更新。5 秒是检查间隔，并非服务器数据更新或请求完成时间的保证。
 
 会员类型优先来自当前本地登录信息，并结合远程响应和 session 事件中的 `plan_type`；不会根据额度大小猜测会员类型。
 
@@ -140,7 +140,7 @@ access token 只用于请求用量接口，不写入日志，不提交到仓库�
 可选文件：
 
 - `codex-usage-taskbar.exe`：单文件可执行程序，下载后可直接运行。
-- `codex-usage-taskbar-v0.2.0-windows-x64-portable.zip`：便携版压缩包，包含 exe、README、LICENSE 和中文使用说明。
+- `codex-usage-taskbar-v0.1.1-windows-x64-portable.zip`：便携版压缩包，包含 exe、README、LICENSE 和中文使用说明。
 
 便携版环境要求：
 
@@ -154,7 +154,7 @@ access token 只用于请求用量接口，不写入日志，不提交到仓库�
 
 运行方式：
 
-1. 下载 `codex-usage-taskbar-v0.2.0-windows-x64-portable.zip`。
+1. 下载 `codex-usage-taskbar-v0.1.1-windows-x64-portable.zip`。
 2. 解压到任意目录。
 3. 双击 `codex-usage-taskbar.exe`。
 4. 右键任务栏小组件，可刷新、调整刷新频率、选择模型、设置颜色、选择屏幕、重置位置。
