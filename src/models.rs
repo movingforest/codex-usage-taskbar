@@ -1,5 +1,23 @@
 use std::time::SystemTime;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodexPlan {
+    #[default]
+    Unknown,
+    Plus,
+    Pro,
+}
+
+impl CodexPlan {
+    pub fn from_label(label: Option<&str>) -> Self {
+        match label.map(str::to_ascii_lowercase).as_deref() {
+            Some("plus" | "chatgptplus") => Self::Plus,
+            Some("pro" | "chatgptpro") => Self::Pro,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsageSource {
     Unknown,
@@ -67,6 +85,8 @@ impl UsageSection {
 pub struct UsageData {
     pub session: UsageSection,
     pub weekly: UsageSection,
+    pub codex_plan: CodexPlan,
+    pub observed_at: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Default)]

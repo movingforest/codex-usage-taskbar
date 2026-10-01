@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
-use crate::models::AppUsageData;
+use crate::models::{AppUsageData, CodexPlan, UsageData};
 use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
@@ -64,6 +64,7 @@ struct AppState {
     codex_session_text: String,
     codex_weekly_percent: f64,
     codex_weekly_text: String,
+    codex_plan: CodexPlan,
     antigravity_session_percent: f64,
     antigravity_session_text: String,
     antigravity_weekly_percent: f64,
@@ -1022,22 +1023,25 @@ fn draw_preview_widget(hdc: HDC, state: &ColorSettingsState, rect: RECT) {
         .or_else(|| reset_time_text(&claude_weekly_text))
         .unwrap_or_else(|| "07-10".to_string());
 
+    let single_row = codex_display_plan() == CodexPlan::Pro;
+    if !single_row {
+        draw_preview_row(
+            hdc,
+            x + sc(28),
+            y + sc(16),
+            "5h",
+            &reset_5h,
+            codex_session_pct,
+            &percent_text(&codex_session_text),
+            claude_session_pct,
+            &percent_text(&claude_session_text),
+            &state.colors,
+        );
+    }
     draw_preview_row(
         hdc,
         x + sc(28),
-        y + sc(16),
-        "5h",
-        &reset_5h,
-        codex_session_pct,
-        &percent_text(&codex_session_text),
-        claude_session_pct,
-        &percent_text(&claude_session_text),
-        &state.colors,
-    );
-    draw_preview_row(
-        hdc,
-        x + sc(28),
-        y + sc(54),
+        y + sc(if single_row { 35 } else { 54 }),
         "7d",
         &reset_7d,
         codex_weekly_pct,
@@ -1703,6 +1707,14 @@ fn save_state_settings() {
 
 fn codex_tooltip(s: &AppState) -> String {
     if let Some(codex) = s.data.as_ref().and_then(|data| data.codex.as_ref()) {
+        if s.codex_plan != CodexPlan::Pro {
+            return format!(
+                "{} 5h: {} | 7d: {}",
+                s.language.strings().codex_model,
+                poller::format_detail_line(&codex.session),
+                poller::format_detail_line(&codex.weekly)
+            );
+        }
         format!(
             "{} 7d: {}",
             s.language.strings().codex_model,
@@ -2465,6 +2477,27 @@ const LARGE_MODEL_PERCENT_WIDTH: i32 = 48;
 const MODEL_RIGHT_MARGIN: i32 = 5;
 const RIGHT_MARGIN: i32 = 4;
 const WIDGET_HEIGHT: i32 = 46;
+const TIMER_CODEX_LOCAL: usize = 5;
+const CODEX_LOCAL_CHECK_MS: u32 = 5_000;
+static POLL_MUTEX: Mutex<()> = Mutex::new(());
+static MANUAL_POLL_PENDING: AtomicBool = AtomicBool::new(false);
+static LOCAL_POLL_MUTEX: Mutex<()> = Mutex::new(());
+
+fn weekly_only_layout(
+    plan: CodexPlan,
+    show_codex: bool,
+    show_claude: bool,
+    show_antigravity: bool,
+) -> bool {
+    show_codex && plan == CodexPlan::Pro && !show_claude && !show_antigravity
+}
+
+fn codex_display_plan() -> CodexPlan {
+    lock_state()
+        .as_ref()
+        .map(|state| state.codex_plan)
+        .unwrap_or_default()
+}
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     let divider_h = sc(25);
@@ -2692,6 +2725,7 @@ pub fn run() {
                 codex_session_text: "--".to_string(),
                 codex_weekly_percent: 0.0,
                 codex_weekly_text: "--".to_string(),
+                codex_plan: poller::current_codex_plan(),
                 antigravity_session_percent: 0.0,
                 antigravity_session_text: "--".to_string(),
                 antigravity_weekly_percent: 0.0,
@@ -2778,6 +2812,7 @@ pub fn run() {
                 .unwrap_or(POLL_15_MIN)
         };
         SetTimer(hwnd, TIMER_POLL, initial_poll_ms, None);
+        SetTimer(hwnd, TIMER_CODEX_LOCAL, CODEX_LOCAL_CHECK_MS, None);
 
         // Watch for explorer.exe restarts so we can re-embed and re-add the tray
         // icon (the shell discards tray registrations when it restarts). This
@@ -2790,7 +2825,7 @@ pub fn run() {
         let send_hwnd = SendHwnd::from_hwnd(hwnd);
         std::thread::spawn(move || {
             diagnose::log("initial poll thread started");
-            do_poll(send_hwnd);
+            do_poll(send_hwnd, false);
         });
 
         schedule_auto_update_check(hwnd);
@@ -2960,6 +2995,7 @@ fn render_layered() {
             show_claude_code,
             show_codex,
             show_antigravity,
+            codex_display_plan(),
             &codex_accent,
             &antigravity_accent,
         );
@@ -3036,9 +3072,11 @@ fn paint_content(
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
+    plan: CodexPlan,
     codex_accent: &Color,
     antigravity_accent: &Color,
 ) {
+    let single_row = weekly_only_layout(plan, show_codex, show_claude_code, show_antigravity);
     unsafe {
         let client_rect = RECT {
             left: 0,
@@ -3089,7 +3127,11 @@ fn paint_content(
         let _ = DeleteObject(right_brush);
 
         let content_x = sc(LEFT_DIVIDER_W) + sc(DIVIDER_RIGHT_MARGIN);
-        let row2_y = height - sc(5) - sc(CLOCK_SIZE);
+        let row2_y = if single_row {
+            (height - sc(LARGE_CLOCK_SIZE)) / 2
+        } else {
+            height - sc(5) - sc(CLOCK_SIZE)
+        };
         let row1_y = row2_y - sc(10) - sc(CLOCK_SIZE);
 
         let _ = SetBkMode(hdc, TRANSPARENT);
@@ -3114,27 +3156,29 @@ fn paint_content(
         );
         let old_font = SelectObject(hdc, font);
 
-        draw_row(
-            hdc,
-            content_x,
-            row1_y,
-            is_dark,
-            text_color,
-            strings.session_window,
-            session_pct,
-            session_text,
-            codex_session_pct,
-            codex_session_text,
-            antigravity_session_pct,
-            antigravity_session_text,
-            show_claude_code,
-            show_codex,
-            show_antigravity,
-            accent,
-            codex_accent,
-            antigravity_accent,
-            track,
-        );
+        if !single_row {
+            draw_row(
+                hdc,
+                content_x,
+                row1_y,
+                is_dark,
+                text_color,
+                strings.session_window,
+                session_pct,
+                session_text,
+                codex_session_pct,
+                codex_session_text,
+                antigravity_session_pct,
+                antigravity_session_text,
+                show_claude_code,
+                show_codex && plan != CodexPlan::Pro,
+                show_antigravity,
+                accent,
+                codex_accent,
+                antigravity_accent,
+                track,
+            );
+        }
         draw_row(
             hdc,
             content_x,
@@ -3162,7 +3206,79 @@ fn paint_content(
     }
 }
 
-fn do_poll(send_hwnd: SendHwnd) {
+fn do_poll(send_hwnd: SendHwnd, force_remote: bool) {
+    if force_remote {
+        MANUAL_POLL_PENDING.store(true, Ordering::Release);
+    }
+    let Ok(guard) = POLL_MUTEX.try_lock() else {
+        return;
+    };
+    loop {
+        let force_remote = MANUAL_POLL_PENDING.swap(false, Ordering::AcqRel);
+        do_poll_inner(send_hwnd, force_remote);
+        if !MANUAL_POLL_PENDING.load(Ordering::Acquire) {
+            break;
+        }
+    }
+    drop(guard);
+    // A refresh may have arrived just before the previous lock was released.
+    if MANUAL_POLL_PENDING.load(Ordering::Acquire) {
+        do_poll(send_hwnd, false);
+    }
+}
+
+fn usage_is_newer(incoming: &UsageData, current: &UsageData) -> bool {
+    incoming.observed_at > current.observed_at
+}
+
+fn refresh_local_codex(send_hwnd: SendHwnd) {
+    let Ok(_guard) = LOCAL_POLL_MUTEX.try_lock() else {
+        return;
+    };
+    if !lock_state().as_ref().is_some_and(|state| state.show_codex) {
+        return;
+    }
+    let plan = poller::current_codex_plan();
+    let incoming = poller::latest_local_codex_usage();
+    let mut state = lock_state();
+    let Some(s) = state.as_mut() else {
+        return;
+    };
+    let mut changed = false;
+    if s.codex_plan != plan && plan != CodexPlan::Unknown {
+        s.codex_plan = plan;
+        changed = true;
+    }
+    if let Some(codex) = incoming {
+        let current = s.data.as_ref().and_then(|data| data.codex.as_ref());
+        if current.map_or(true, |current| usage_is_newer(&codex, current)) {
+            diagnose::log(format!("Codex live update: plan={:?}, 5h remaining {:.0}%, 7d remaining {:.0}%, observed_at={:?}",
+                codex.codex_plan, codex.session.remaining_percent, codex.weekly.remaining_percent, codex.observed_at));
+            s.codex_session_percent = codex.session.percentage;
+            s.codex_weekly_percent = codex.weekly.percentage;
+            if codex.codex_plan != CodexPlan::Unknown {
+                s.codex_plan = codex.codex_plan;
+            }
+            s.data.get_or_insert_with(AppUsageData::default).codex = Some(codex);
+            s.last_poll_ok = true;
+            refresh_usage_texts(s);
+            changed = true;
+        }
+    }
+    drop(state);
+    if changed {
+        unsafe {
+            let _ = PostMessageW(
+                send_hwnd.to_hwnd(),
+                WM_APP_USAGE_UPDATED,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
+fn do_poll_inner(send_hwnd: SendHwnd, force_remote: bool) {
     let hwnd = send_hwnd.to_hwnd();
     let (show_claude_code, show_codex, show_antigravity) = {
         let state = lock_state();
@@ -3172,10 +3288,20 @@ fn do_poll(send_hwnd: SendHwnd) {
             .unwrap_or((false, true, false))
     };
 
-    match poller::poll(show_claude_code, show_codex, show_antigravity) {
-        Ok(data) => {
+    match poller::poll(show_claude_code, show_codex, show_antigravity, force_remote) {
+        Ok(mut data) => {
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
+                // A slow remote request may finish after a newer live event.
+                // Keep that newer snapshot instead of rolling the display back.
+                if let (Some(current), Some(incoming)) = (
+                    s.data.as_ref().and_then(|data| data.codex.as_ref()),
+                    data.codex.as_ref(),
+                ) {
+                    if usage_is_newer(current, incoming) {
+                        data.codex = Some(current.clone());
+                    }
+                }
                 if let Some(claude_code) = data.claude_code.as_ref() {
                     s.session_percent = claude_code.session.percentage;
                     s.weekly_percent = claude_code.weekly.percentage;
@@ -3184,6 +3310,9 @@ fn do_poll(send_hwnd: SendHwnd) {
                     s.weekly_percent = 0.0;
                 }
                 if let Some(codex) = data.codex.as_ref() {
+                    if codex.codex_plan != CodexPlan::Unknown {
+                        s.codex_plan = codex.codex_plan;
+                    }
                     s.codex_session_percent = codex.session.percentage;
                     s.codex_weekly_percent = codex.weekly.percentage;
                 } else if s.show_codex {
@@ -3688,14 +3817,14 @@ unsafe extern "system" fn wnd_proc(
                                 drop(state);
                                 let sh = SendHwnd::from_hwnd(hwnd);
                                 std::thread::spawn(move || {
-                                    do_poll(sh);
+                                    do_poll(sh, true);
                                 });
                             }
                         }
                         Some((false, _, _)) => {
                             let sh = SendHwnd::from_hwnd(hwnd);
                             std::thread::spawn(move || {
-                                do_poll(sh);
+                                do_poll(sh, true);
                             });
                         }
                         None => {}
@@ -3717,12 +3846,16 @@ unsafe extern "system" fn wnd_proc(
                     if should_poll {
                         let sh = SendHwnd::from_hwnd(hwnd);
                         std::thread::spawn(move || {
-                            do_poll(sh);
+                            do_poll(sh, true);
                         });
                     }
                 }
                 TIMER_UPDATE_CHECK => {
                     begin_update_check(hwnd, false);
+                }
+                TIMER_CODEX_LOCAL => {
+                    let sh = SendHwnd::from_hwnd(hwnd);
+                    std::thread::spawn(move || refresh_local_codex(sh));
                 }
                 _ => {}
             }
@@ -3946,7 +4079,7 @@ unsafe extern "system" fn wnd_proc(
                     render_layered();
                     let sh = SendHwnd::from_hwnd(hwnd);
                     std::thread::spawn(move || {
-                        do_poll(sh);
+                        do_poll(sh, true);
                     });
                 }
                 IDM_VERSION_ACTION => {
@@ -4061,7 +4194,7 @@ unsafe extern "system" fn wnd_proc(
                     sync_tray_icons(hwnd);
                     let sh = SendHwnd::from_hwnd(hwnd);
                     std::thread::spawn(move || {
-                        do_poll(sh);
+                        do_poll(sh, true);
                     });
                 }
                 IDM_COLORS_DIALOG => {
@@ -4622,6 +4755,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
             show_claude_code,
             show_codex,
             show_antigravity,
+            codex_display_plan(),
             &codex_accent,
             &antigravity_accent,
         );
@@ -4887,7 +5021,112 @@ fn draw_clock(
 
 #[cfg(test)]
 mod tests {
-    use super::{quoted_startup_command, startup_value_matches_executable};
+    use super::{
+        quoted_startup_command, startup_value_matches_executable, usage_is_newer,
+        weekly_only_layout,
+    };
+    use crate::models::{CodexPlan, UsageData};
+    use std::time::{Duration, SystemTime};
+
+    fn rendered_quota_rows(plan: CodexPlan) -> Vec<bool> {
+        use super::*;
+        let width = total_widget_width_for(1);
+        let height = sc(WIDGET_HEIGHT);
+        let accent = Color::from_hex("#0066FF");
+        let bg = Color::from_hex("#FFFFFF");
+        let text = Color::from_hex("#000000");
+        let track = Color::from_hex("#EEEEEE");
+        unsafe {
+            let dc = CreateCompatibleDC(HDC::default());
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
+            let old = SelectObject(dc, bmp);
+            super::paint_content(
+                dc,
+                width,
+                height,
+                false,
+                &bg,
+                &text,
+                &accent,
+                &track,
+                LanguageId::English.strings(),
+                0.0,
+                "--",
+                0.0,
+                "--",
+                7.0,
+                "93% · 20:00",
+                18.0,
+                "82% · 10-07",
+                0.0,
+                "--",
+                0.0,
+                "--",
+                false,
+                true,
+                false,
+                plan,
+                &accent,
+                &accent,
+            );
+            let _ = GdiFlush();
+            let pixels = std::slice::from_raw_parts(bits as *const u32, (width * height) as usize);
+            let rows = pixels
+                .chunks(width as usize)
+                .map(|row| row.iter().any(|pixel| pixel & 0x00FFFFFF == 0x000066FF))
+                .collect();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bmp);
+            let _ = DeleteDC(dc);
+            rows
+        }
+    }
+
+    #[test]
+    fn actual_renderer_draws_one_centered_row_for_pro_and_two_for_plus() {
+        let pro = rendered_quota_rows(CodexPlan::Pro);
+        let plus = rendered_quota_rows(CodexPlan::Plus);
+        assert!(pro[14..32].iter().any(|painted| *painted));
+        assert!(!pro[0..13].iter().any(|painted| *painted));
+        assert!(!pro[34..].iter().any(|painted| *painted));
+        assert!(plus[0..13].iter().any(|painted| *painted));
+        assert!(plus[34..].iter().any(|painted| *painted));
+    }
+
+    #[test]
+    fn membership_selects_the_requested_layout() {
+        assert!(weekly_only_layout(CodexPlan::Pro, true, false, false));
+        assert!(!weekly_only_layout(CodexPlan::Plus, true, false, false));
+        assert!(!weekly_only_layout(CodexPlan::Unknown, true, false, false));
+        assert!(!weekly_only_layout(CodexPlan::Pro, true, true, false));
+    }
+
+    #[test]
+    fn slow_remote_snapshot_does_not_replace_a_newer_live_update() {
+        let started = SystemTime::now();
+        let remote = UsageData {
+            observed_at: Some(started),
+            ..UsageData::default()
+        };
+        let live = UsageData {
+            observed_at: Some(started + Duration::from_secs(1)),
+            ..UsageData::default()
+        };
+        assert!(usage_is_newer(&live, &remote));
+        assert!(!usage_is_newer(&remote, &live));
+    }
 
     #[test]
     fn startup_registry_match_accepts_quoted_paths_with_spaces() {

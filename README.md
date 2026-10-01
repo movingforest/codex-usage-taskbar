@@ -35,7 +35,8 @@ If this project helps you, please consider giving it a Star to support future up
 - 支持 Codex 用量显示，默认启用 Codex。
 - 支持 Claude Code 用量显示，可在右键菜单中启用。
 - 支持 Codex + Claude Code 同时显示，也支持只显示其中一个。
-- 显示 `5h` 窗口剩余比例和 5 小时重置时间。
+- 自动识别当前 Codex 登录账号的会员类型：Plus 显示 `5h`＋`7d` 双行，Pro 显示 `7d` 单行。
+- Plus 显示 `5h` 窗口剩余比例和 5 小时重置时间。
 - 显示 `7d` 窗口剩余比例和 7 天窗口日期，格式为 `MM-DD`。
 - 使用紧凑的圆环时钟 UI 表示用量，减少任务栏占用空间。
 - Codex 默认蓝色，Claude Code 默认橙色。
@@ -43,16 +44,19 @@ If this project helps you, please consider giving it a Star to support future up
 - **支持多屏幕选择**，默认放在主屏幕任务栏。
 - **支持拖动调整**任务栏位置，也可以通过菜单重置位置。
 - **刷新屏幕**：支持手动刷新、刷新频率设置、任务栏托盘图标、右键菜单、开机启动和检查更新。
+- 每 5 秒增量检查本地 Codex 用量事件；手动刷新和定期轮询会请求远程额度，慢请求不会覆盖更新的本地结果。
 - **支持多语言**：支持简体中文和英文，默认优先使用系统语言；中文环境下显示中文。
 - 关于页面可直接打开 GitHub 项目地址。
 - 支持诊断日志，日志写入本机临时目录，不上传。
 
 ## UI 显示
 
-任务栏主界面使用两行紧凑布局：
+Plus 的任务栏主界面使用两行紧凑布局：
 
 - `5h` 行：显示 5 小时窗口、重置时间、Codex/Claude 剩余比例。
 - `7d` 行：显示 7 天窗口、重置日期、Codex/Claude 剩余比例。
+
+检测到 Pro 时，只启用 Codex 的主界面改为居中的 `7d` 单行；颜色预览和托盘提示同步切换。若还启用了 Claude，保留 Claude 的双额度显示，Codex 仅在 `7d` 行显示。会员类型未知时保留双行布局。
 
 当 Codex 和 Claude 同时启用时，会显示两个颜色区分的圆环。  
 当只启用 Codex 或只启用 Claude 时，圆环和文字会自动放大，提高可读性。
@@ -93,10 +97,13 @@ If this project helps you, please consider giving it a Star to support future up
 
 ## 数据来源
 
-Codex 用量读取顺序：
+Codex 用量更新方式：
 
-1. ChatGPT Codex usage endpoint：`https://chatgpt.com/backend-api/wham/usage`
-2. 本地 fallback：读取 `%USERPROFILE%\.codex\sessions` 下最新 session JSONL 中的 `token_count.rate_limits`
+1. 每 5 秒增量读取 `%USERPROFILE%\.codex\sessions`（或 `%CODEX_HOME%\sessions`）中新的 `token_count.rate_limits`，比较事件时间而非只比较会话文件修改时间。
+2. 按菜单设置的刷新频率请求 ChatGPT Codex usage endpoint：`https://chatgpt.com/backend-api/wham/usage`；手动刷新也会重新请求，不受本地 5 分钟新鲜度判断限制。
+3. 远程请求失败时保留本地额度作为回退；正在进行的远程请求不会阻塞本地新事件更新。服务器或 Codex 尚未产出新用量事件时，客户端无法提前计算真实额度。
+
+会员类型优先来自当前本地登录信息，并结合远程响应和 session 事件中的 `plan_type`；不会根据额度大小猜测会员类型。
 
 远程读取会使用 Codex CLI 已登录后的本地认证文件：
 

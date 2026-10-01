@@ -17,6 +17,7 @@ Comments = "https://github.com/forest/codex-usage-taskbar"
 LegalCopyright = "Copyright (C) 2026 Forest. Based on Claude Code Usage Monitor by Code Zeno Pty Ltd."
 
 [dependencies]
+base64 = "0.22"
 ureq = { version = "2", default-features = false, features = ["native-tls", "json", "proxy-from-env"] }
 native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }

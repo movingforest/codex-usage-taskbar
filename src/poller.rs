@@ -3,17 +3,19 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
 use std::os::windows::process::CommandExt;
 
 use crate::diagnose;
 use crate::localization::Strings;
-use crate::models::{AppUsageData, UsageData, UsageSection, UsageSource};
+use crate::models::{AppUsageData, CodexPlan, UsageData, UsageSection, UsageSource};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -67,11 +69,13 @@ struct CodexAuthFile {
 struct CodexTokenData {
     access_token: String,
     account_id: Option<String>,
+    id_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct CodexUsageResponse {
     rate_limit: Option<Option<Box<CodexRateLimitDetails>>>,
+    plan_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -185,13 +189,14 @@ pub fn poll(
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
+    force_remote: bool,
 ) -> Result<AppUsageData, PollError> {
     poll_with(
         show_claude_code,
         show_codex,
         show_antigravity,
         poll_claude_code,
-        poll_codex,
+        || poll_codex(force_remote),
         poll_antigravity,
     )
 }
@@ -265,15 +270,57 @@ fn poll_claude_code() -> Result<UsageData, PollError> {
     fetch_usage_with_fallback(&creds.access_token)
 }
 
-fn poll_codex() -> Result<UsageData, PollError> {
+pub fn current_codex_plan() -> CodexPlan {
+    read_codex_credentials()
+        .map(|credentials| plan_from_credentials(&credentials))
+        .unwrap_or_default()
+}
+
+fn plan_from_credentials(credentials: &CodexTokenData) -> CodexPlan {
+    credentials
+        .id_token
+        .as_deref()
+        .and_then(|token| token.split('.').nth(1))
+        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok())
+        .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
+        .map(|claims| {
+            CodexPlan::from_label(
+                claims
+                    .get("https://api.openai.com/auth")
+                    .and_then(|auth| auth.get("chatgpt_plan_type"))
+                    .and_then(|plan| plan.as_str()),
+            )
+        })
+        .unwrap_or_default()
+}
+
+pub fn latest_local_codex_usage() -> Option<UsageData> {
+    let candidate = read_latest_codex_session_candidate()?;
+    if !codex_session_candidate_is_fresh(&candidate, SystemTime::now()) {
+        return None;
+    }
+    let current_plan = current_codex_plan();
+    if current_plan != CodexPlan::Unknown
+        && candidate.usage.codex_plan != CodexPlan::Unknown
+        && candidate.usage.codex_plan != current_plan
+    {
+        return None;
+    }
+    let mut data = prepare_codex_usage_for_display(candidate.usage);
+    if current_plan != CodexPlan::Unknown {
+        data.codex_plan = current_plan;
+    }
+    Some(data)
+}
+
+fn poll_codex(force_remote: bool) -> Result<UsageData, PollError> {
     // Codex writes the current rate limit into the active session before this
     // helper can reliably reach the ChatGPT endpoint on every network. Prefer
     // that just-written record so a weekly reset is reflected immediately
     // instead of leaving the previous percentage on screen while the remote
     // request waits for its timeout.
-    if let Some(candidate) = read_latest_codex_session_candidate() {
-        if codex_session_candidate_is_fresh(&candidate, SystemTime::now()) {
-            let data = prepare_codex_usage_for_display(candidate.usage);
+    if !force_remote {
+        if let Some(data) = latest_local_codex_usage() {
             diagnose::log(format!(
                 "using fresh local Codex usage: session remaining {:.0}%, weekly remaining {:.0}%",
                 data.session.remaining_percent, data.weekly.remaining_percent
@@ -286,9 +333,12 @@ fn poll_codex() -> Result<UsageData, PollError> {
         Some(creds) => match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
             Ok(data) => Ok(data),
             Err(PollError::AuthRequired) => {
-                cli_refresh_codex_token();
                 let refreshed = read_codex_credentials().ok_or(PollError::TokenExpired)?;
-                fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
+                if refreshed.access_token != creds.access_token {
+                    fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
+                } else {
+                    Err(PollError::AuthRequired)
+                }
             }
             Err(error) => Err(error),
         },
@@ -299,10 +349,22 @@ fn poll_codex() -> Result<UsageData, PollError> {
     };
 
     match remote_result {
-        Ok(data) => Ok(prepare_codex_usage_for_display(data)),
+        Ok(mut data) => {
+            if data.codex_plan == CodexPlan::Unknown {
+                data.codex_plan = current_codex_plan();
+            }
+            Ok(prepare_codex_usage_for_display(data))
+        }
         Err(error) => match read_latest_codex_session_usage() {
             Some(data) => {
-                let data = prepare_codex_usage_for_display(data);
+                let mut data = prepare_codex_usage_for_display(data);
+                let plan = current_codex_plan();
+                if plan != CodexPlan::Unknown {
+                    if data.codex_plan != CodexPlan::Unknown && data.codex_plan != plan {
+                        return Err(error);
+                    }
+                    data.codex_plan = plan;
+                }
                 diagnose::log(format!(
                     "Codex usage remote poll failed with {error:?}; using local session fallback: session remaining {:.0}%, weekly remaining {:.0}%",
                     data.session.remaining_percent, data.weekly.remaining_percent
@@ -320,6 +382,9 @@ fn poll_codex() -> Result<UsageData, PollError> {
 /// seconds until Codex writes or returns the replacement window.
 fn prepare_codex_usage_for_display(mut data: UsageData) -> UsageData {
     for section in [&mut data.session, &mut data.weekly] {
+        section.stale = section
+            .resets_at
+            .is_some_and(|reset| reset <= SystemTime::now());
         if section.stale {
             section.percentage = 0.0;
             section.used_percent = 0.0;
@@ -455,50 +520,6 @@ fn cli_refresh_wsl_token(distro: &str) {
     wait_for_refresh(&mut child);
 }
 
-fn cli_refresh_codex_token() {
-    let codex_path = resolve_windows_codex_path();
-    let is_cmd = codex_path.to_lowercase().ends_with(".cmd");
-    let is_ps1 = codex_path.to_lowercase().ends_with(".ps1");
-    diagnose::log(format!(
-        "attempting Windows Codex token refresh via {codex_path}"
-    ));
-
-    let args: &[&str] = &["exec", "."];
-
-    let mut cmd = if is_cmd {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/c").arg(&codex_path).args(args);
-        c
-    } else if is_ps1 {
-        let mut c = Command::new("powershell.exe");
-        c.arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&codex_path)
-            .args(args);
-        c
-    } else {
-        let mut c = Command::new(&codex_path);
-        c.args(args);
-        c
-    };
-    cmd.creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(error) => {
-            diagnose::log_error("unable to spawn Windows Codex token refresh", error);
-            return;
-        }
-    };
-
-    wait_for_refresh(&mut child);
-}
-
 /// Spawn a command and wait up to `timeout` for it to finish.
 /// Returns None if the process fails to start or exceeds the deadline.
 fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::Output> {
@@ -574,41 +595,6 @@ fn resolve_windows_claude_path() -> String {
     "claude.cmd".to_string()
 }
 
-fn resolve_windows_codex_path() -> String {
-    for name in &["codex.cmd", "codex.ps1", "codex.exe", "codex"] {
-        if Command::new(name)
-            .arg("--version")
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return name.to_string();
-        }
-    }
-
-    for name in &["codex.cmd", "codex.ps1", "codex.exe", "codex"] {
-        if let Ok(output) = Command::new("where.exe")
-            .arg(name)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let path = first_line.trim().to_string();
-                    if !path.is_empty() {
-                        return path;
-                    }
-                }
-            }
-        }
-    }
-
-    "codex.cmd".to_string()
-}
-
 fn build_agent() -> Result<ureq::Agent, PollError> {
     let tls = native_tls::TlsConnector::new().map_err(|_| PollError::RequestFailed)?;
     Ok(ureq::AgentBuilder::new()
@@ -634,6 +620,9 @@ pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSn
         .into_iter()
         .filter_map(|source| credential_watch_signature(&source))
         .collect();
+    if let Some(path) = codex_auth_path() {
+        snapshot.push(windows_credential_watch_signature(&path));
+    }
     snapshot.sort();
     snapshot.dedup();
     snapshot
@@ -881,6 +870,7 @@ fn parse_rate_limit_headers(response: &ureq::Response) -> UsageData {
 }
 
 fn fetch_codex_usage(token: &str, account_id: Option<&str>) -> Result<UsageData, PollError> {
+    let observed_at = SystemTime::now();
     let agent = build_agent()?;
     let mut request = agent
         .get(CODEX_USAGE_URL)
@@ -913,12 +903,20 @@ fn fetch_codex_usage(token: &str, account_id: Option<&str>) -> Result<UsageData,
         }
     };
 
-    codex_usage_from_response(response).ok_or(PollError::RequestFailed)
+    let mut data = codex_usage_from_response(response).ok_or(PollError::RequestFailed)?;
+    data.observed_at = Some(observed_at);
+    diagnose::log(format!(
+        "Codex remote usage: plan={:?}, 5h remaining {:.0}%, 7d remaining {:.0}%",
+        data.codex_plan, data.session.remaining_percent, data.weekly.remaining_percent
+    ));
+    Ok(data)
 }
 
 fn codex_usage_from_response(response: CodexUsageResponse) -> Option<UsageData> {
     let details = *response.rate_limit.flatten()?;
     let mut data = UsageData::default();
+
+    data.codex_plan = CodexPlan::from_label(response.plan_type.as_deref());
 
     let primary = flatten_codex_window(&details.primary_window);
     let secondary = flatten_codex_window(&details.secondary_window);
@@ -993,7 +991,6 @@ fn classify_codex_window_metadata(
         || label.contains("five_hour")
         || label.contains("five-hour")
         || label.contains("five hour")
-        || label.contains("primary")
     {
         return CodexWindowKind::Session;
     }
@@ -1029,10 +1026,20 @@ fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
     )
 }
 
+#[derive(Clone)]
 struct CodexSessionCandidate {
     timestamp: SystemTime,
     usage: UsageData,
 }
+
+#[derive(Default)]
+struct CachedCodexSession {
+    offset: u64,
+    modified: Option<SystemTime>,
+    candidate: Option<CodexSessionCandidate>,
+}
+
+static CODEX_SESSION_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedCodexSession>>> = OnceLock::new();
 
 fn read_latest_codex_session_usage() -> Option<UsageData> {
     Some(read_latest_codex_session_candidate()?.usage)
@@ -1060,32 +1067,48 @@ fn read_latest_codex_session_candidate_from_root(root: &Path) -> Option<CodexSes
     let mut files = Vec::new();
     collect_jsonl_files(root, &mut files);
 
-    // Session files are append-only. The file written most recently contains
-    // the newest rate-limit event in normal operation, so checking files in
-    // modification order avoids reparsing every historical (potentially very
-    // large) Codex transcript on every one-minute widget refresh.
-    files.sort_by_key(|path| {
-        std::cmp::Reverse(
-            fs::metadata(path)
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(UNIX_EPOCH),
-        )
-    });
-
-    files
+    let mut files: Vec<_> = files
         .into_iter()
-        .find_map(|file| parse_codex_session_file(&file))
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+
+    let mut latest: Option<CodexSessionCandidate> = None;
+    for (path, modified) in files {
+        // Older files cannot contain an event newer than their last write.
+        // A recently resumed conversation can still contain old usage, so
+        // compare event timestamps instead of taking the first file's result.
+        if latest
+            .as_ref()
+            .is_some_and(|candidate| candidate.timestamp > modified)
+        {
+            break;
+        }
+        if let Some(candidate) = parse_codex_session_file(&path) {
+            if latest
+                .as_ref()
+                .map_or(true, |current| candidate.timestamp > current.timestamp)
+            {
+                latest = Some(candidate);
+            }
+        }
+    }
+    latest
 }
 
 fn codex_session_candidate_is_fresh(candidate: &CodexSessionCandidate, now: SystemTime) -> bool {
     let age = now.duration_since(candidate.timestamp).unwrap_or_default();
-    let weekly_window_is_current = candidate
-        .usage
-        .weekly
-        .resets_at
-        .is_some_and(|reset| reset > now);
-
-    age <= Duration::from_secs(CODEX_LOCAL_USAGE_FRESH_SECS) && weekly_window_is_current
+    let sections = [&candidate.usage.session, &candidate.usage.weekly];
+    let has_window = sections
+        .iter()
+        .any(|section| section.source != UsageSource::Unknown);
+    let windows_are_current = sections
+        .iter()
+        .all(|section| section.resets_at.map_or(true, |reset| reset > now));
+    age <= Duration::from_secs(CODEX_LOCAL_USAGE_FRESH_SECS) && has_window && windows_are_current
 }
 
 fn collect_jsonl_files(path: &Path, out: &mut Vec<PathBuf>) {
@@ -1108,29 +1131,57 @@ fn collect_jsonl_files(path: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn parse_codex_session_file(path: &Path) -> Option<CodexSessionCandidate> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut latest = None;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let modified = metadata.modified().ok();
+    let mut cache = CODEX_SESSION_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let cached = cache.entry(path.to_path_buf()).or_default();
+    if metadata.len() < cached.offset
+        || (metadata.len() == cached.offset && modified != cached.modified)
+    {
+        *cached = CachedCodexSession::default();
+    }
+    file.seek(SeekFrom::Start(cached.offset)).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_until(b'\n', &mut line).ok()?;
+        if bytes == 0 {
+            break;
+        }
+        let record = if line
+            .windows(b"\"token_count\"".len())
+            .any(|window| window == b"\"token_count\"")
+        {
+            serde_json::from_slice::<serde_json::Value>(&line).ok()
+        } else {
+            None
         };
-        let Some(candidate) = codex_candidate_from_session_record(&record) else {
-            continue;
-        };
-
-        let is_newer = latest
+        // Keep the starting offset of a partial JSON line so the next scan
+        // can read it again after Codex finishes appending it.
+        if !line.ends_with(b"\n") && serde_json::from_slice::<serde_json::Value>(&line).is_err() {
+            break;
+        }
+        cached.offset += bytes as u64;
+        if let Some(candidate) = record
             .as_ref()
-            .map_or(true, |current: &CodexSessionCandidate| {
-                candidate.timestamp > current.timestamp
-            });
-        if is_newer {
-            latest = Some(candidate);
+            .and_then(codex_candidate_from_session_record)
+        {
+            if cached
+                .candidate
+                .as_ref()
+                .map_or(true, |current| candidate.timestamp > current.timestamp)
+            {
+                cached.candidate = Some(candidate);
+            }
         }
     }
-
-    latest
+    cached.modified = modified;
+    cached.candidate.clone()
 }
 
 fn codex_candidate_from_session_record(
@@ -1148,7 +1199,8 @@ fn codex_candidate_from_session_record(
     let timestamp = record
         .get("timestamp")
         .and_then(|value| value.as_str())
-        .and_then(|value| parse_iso8601(Some(value)))
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(SystemTime::from)
         .unwrap_or(UNIX_EPOCH);
     let usage = codex_usage_from_session_rate_limits(payload.get("rate_limits")?, timestamp)?;
 
@@ -1159,7 +1211,18 @@ fn codex_usage_from_session_rate_limits(
     rate_limits: &serde_json::Value,
     record_timestamp: SystemTime,
 ) -> Option<UsageData> {
+    // Model-specific limits must not replace the account-wide Codex allowance.
+    if rate_limits
+        .get("limit_id")
+        .and_then(|id| id.as_str())
+        .is_some_and(|id| id != "codex")
+    {
+        return None;
+    }
     let mut data = UsageData::default();
+    data.codex_plan =
+        CodexPlan::from_label(rate_limits.get("plan_type").and_then(|plan| plan.as_str()));
+    data.observed_at = Some(record_timestamp);
     let mut found = false;
 
     let primary = rate_limits.get("primary").filter(|limit| !limit.is_null());
@@ -1313,7 +1376,11 @@ fn fetch_antigravity_usage_from_endpoint(
     let session = fetch_antigravity_model_quota(base_url, token, project.as_deref())?;
     let weekly = UsageSection::default();
 
-    Ok(UsageData { session, weekly })
+    Ok(UsageData {
+        session,
+        weekly,
+        ..UsageData::default()
+    })
 }
 
 fn fetch_antigravity_project(base_url: &str, token: &str) -> Result<Option<String>, PollError> {
@@ -2075,10 +2142,142 @@ pub fn app_is_past_reset(data: &AppUsageData) -> bool {
 mod tests {
     use super::*;
 
+    fn rate_event(timestamp: &str, used: f64, plan: &str, limit_id: &str) -> String {
+        serde_json::json!({
+            "type":"event_msg", "timestamp":timestamp,
+            "payload":{"type":"token_count", "rate_limits":{
+                "limit_id":limit_id, "plan_type":plan,
+                "primary":{"used_percent":used,"window_minutes":300,"resets_at":1893456000},
+                "secondary":{"used_percent":18,"window_minutes":10080,"resets_at":1894060800}
+            }}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn resumed_old_conversation_does_not_mask_a_newer_usage_event() {
+        let root = unique_test_dir("event-order");
+        fs::create_dir_all(&root).unwrap();
+        let newer = root.join("newer.jsonl");
+        let resumed = root.join("resumed.jsonl");
+        fs::write(
+            &newer,
+            rate_event("2026-09-30T10:00:01Z", 7.0, "plus", "codex"),
+        )
+        .unwrap();
+        fs::write(
+            &resumed,
+            rate_event("2026-09-30T10:00:00Z", 67.0, "plus", "codex"),
+        )
+        .unwrap();
+        let usage = read_latest_codex_session_usage_from_root(&root).unwrap();
+        assert_eq!(usage.session.remaining_percent, 93.0);
+        assert_eq!(usage.codex_plan, CodexPlan::Plus);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incremental_reader_retries_partial_records_and_preserves_subsecond_order() {
+        use std::io::Write;
+        let root = unique_test_dir("incremental");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                rate_event("2026-09-30T10:00:00.123Z", 7.0, "plus", "codex")
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_codex_session_file(&path)
+                .unwrap()
+                .usage
+                .session
+                .remaining_percent,
+            93.0
+        );
+        let second = rate_event("2026-09-30T10:00:00.456Z", 8.0, "plus", "codex");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&second.as_bytes()[..40]).unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            parse_codex_session_file(&path)
+                .unwrap()
+                .usage
+                .session
+                .remaining_percent,
+            93.0
+        );
+        file.write_all(&second.as_bytes()[40..]).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            parse_codex_session_file(&path)
+                .unwrap()
+                .usage
+                .session
+                .remaining_percent,
+            92.0
+        );
+        drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_specific_quota_cannot_overwrite_the_account_quota() {
+        let record: serde_json::Value = serde_json::from_str(&rate_event(
+            "2026-09-30T10:00:00Z",
+            99.0,
+            "plus",
+            "codex_spark",
+        ))
+        .unwrap();
+        assert!(codex_candidate_from_session_record(&record).is_none());
+    }
+
+    #[test]
+    fn remote_plan_and_weekly_primary_are_parsed_for_pro() {
+        let response = serde_json::from_value(serde_json::json!({
+            "plan_type":"pro", "rate_limit":{"primary_window":{
+                "used_percent":18.0,"reset_at":1894060800,"window_minutes":10080,"name":"primary"
+            }}
+        }))
+        .unwrap();
+        let usage = codex_usage_from_response(response).unwrap();
+        assert_eq!(usage.codex_plan, CodexPlan::Pro);
+        assert_eq!(usage.weekly.remaining_percent, 82.0);
+        assert_eq!(usage.session.source, UsageSource::Unknown);
+    }
+
+    #[test]
+    fn logged_in_plan_is_read_without_logging_token_contents() {
+        for (label, expected) in [
+            ("pro", CodexPlan::Pro),
+            ("plus", CodexPlan::Plus),
+            ("team", CodexPlan::Unknown),
+        ] {
+            let claims =
+                serde_json::json!({"https://api.openai.com/auth":{"chatgpt_plan_type":label}});
+            let token = format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(claims.to_string())
+            );
+            let credentials = CodexTokenData {
+                access_token: String::new(),
+                account_id: None,
+                id_token: Some(token),
+            };
+            assert_eq!(plan_from_credentials(&credentials), expected);
+        }
+    }
+
     fn usage_with_session_percent(percentage: f64) -> UsageData {
         UsageData {
             session: UsageSection::from_used_percent(percentage, None, UsageSource::Remote),
             weekly: UsageSection::default(),
+            ..UsageData::default()
         }
     }
 
@@ -2220,6 +2419,7 @@ mod tests {
                     Some(now + Duration::from_secs(7 * 24 * 60 * 60)),
                     UsageSource::LocalSession,
                 ),
+                ..UsageData::default()
             },
         };
 
@@ -2239,6 +2439,7 @@ mod tests {
                     Some(now + Duration::from_secs(60)),
                     UsageSource::LocalSession,
                 ),
+                ..UsageData::default()
             },
         };
         let expired_candidate = CodexSessionCandidate {
@@ -2250,6 +2451,7 @@ mod tests {
                     Some(now - Duration::from_secs(1)),
                     UsageSource::LocalSession,
                 ),
+                ..UsageData::default()
             },
         };
 
@@ -2291,6 +2493,7 @@ mod tests {
                 Some(future_reset),
                 UsageSource::LocalSession,
             ),
+            ..UsageData::default()
         };
 
         let prepared = prepare_codex_usage_for_display(data);
@@ -2318,6 +2521,7 @@ mod tests {
                 Some(SystemTime::now() + Duration::from_secs(6 * 24 * 60 * 60)),
                 UsageSource::LocalSession,
             ),
+            ..UsageData::default()
         };
 
         let prepared = prepare_codex_usage_for_display(data);
